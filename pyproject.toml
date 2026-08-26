@@ -1,0 +1,81 @@
+[project]
+name = "auto-visual-analgram"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "accelerate==0.25.0",
+    "diffusers==0.24.0",
+    "einops==0.7.0",
+    "huggingface-hub==0.19.4",
+    "imageio==2.33.0",
+    "imageio-ffmpeg==0.4.9",
+    "numpy==1.26.2",
+    "pillow==10.1.0",
+    "safetensors==0.4.1",
+    "sentencepiece==0.1.99",
+    "tokenizers==0.15.0",
+    "torch==2.1.1",
+    "torchvision==0.16.1",
+    "tqdm==4.66.1",
+    "transformers==4.35.2",
+    "visual-anagrams",
+]
+
+[project.optional-dependencies]
+# Verification tooling. Not imported by any module in ava/.
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
+visual-anagrams = { path = "dev/visual_anagrams", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.pytest.ini_options]
+# `ava` is not installed into the venv, so put the repository root on sys.path.
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "slow: needs CUDA and the CLIP/BLIP weights (deselect with -m 'not slow')",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+# dev/ is a vendored upstream checkout and is not ours to lint.
+extend-exclude = ["dev", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["ava", "ava_vocab", "scripts", "tests"]
+# ava_vocab runs in its own environment and cannot import `ava`, so its modules
+# are top-level rather than a package. Put them on the path for type checking.
+mypy_path = ["ava_vocab"]
+exclude = "^dev/"
+warn_unused_ignores = true
+warn_redundant_casts = true
+# These ship without type information.
+[[tool.mypy.overrides]]
+module = [
+    "visual_anagrams.*",
+    "diffusers.*",
+    "transformers.*",
+    "torchvision.*",
+    "PIL.*",
+    "yaml",
+]
+ignore_missing_imports = true

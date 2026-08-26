@@ -1,0 +1,20 @@
+# Environment
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Vendored upstream checkout (has its own .git; installed as an editable dep)
+dev/
+
+# Generated artifacts. Everything here is reproducible from the code plus a
+# seed, and the images and databases are large.
+results/
+runs/
+runs_sweep/
+*.log
+
+# Local working state: each contributor accumulates their own.
+.claude/tasks/
