@@ -12,8 +12,7 @@ dev/
 # Generated artifacts. Everything here is reproducible from the code plus a
 # seed, and the images and databases are large.
 results/
-runs/
-runs_sweep/
+runs*/
 *.log
 
 # Local working state: each contributor accumulates their own.
