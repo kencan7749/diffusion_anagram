@@ -160,6 +160,38 @@ def record_row(
     return row
 
 
+def write_prompt_card(out_dir: Path, spec: CandidateSpec, **extra: object) -> Path:
+    """Leave a readable note beside the images saying what they were.
+
+    A candidate directory is named by a content hash, so on its own it says
+    nothing about what was tried. The prompts are in the round's scores.jsonl,
+    but a directory that has to be cross-referenced to be understood is a
+    directory nobody reads. This is written before generation, so an
+    interrupted candidate still says what it was attempting, and rewritten
+    afterwards with the verdict.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"low    : {spec.prompt_low}",
+        f"high   : {spec.prompt_high}",
+        f"style  : {spec.style or '(none)'}",
+        "",
+        f"far view (blurred) should read as : {spec.full_low}",
+        f"near view (as-is)  should read as : {spec.full_high}",
+        "",
+        f"uid    : {spec.uid()}",
+        f"seed   : {spec.seed}",
+        f"sigma  : {SIGMA}",
+        f"steps  : {spec.num_inference_steps}",
+        f"cfg    : {spec.guidance_scale}",
+    ]
+    for key, value in extra.items():
+        lines.append(f"{key:7s}: {value}")
+    path = out_dir / "prompt.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def evaluate_candidate(
     proposal: Proposal,
     engine: Generator,
@@ -169,6 +201,7 @@ def evaluate_candidate(
     """Generate one candidate, score it, and persist both scored views."""
     from torchvision.utils import save_image
 
+    write_prompt_card(out_dir, proposal.spec, origin=proposal.origin)
     _, image_256 = engine.generate(proposal.spec)
     image_path = save_sample(image_256, out_dir)
 
@@ -212,6 +245,16 @@ def run_round(
             # Credit is assigned per component, so one candidate teaches three arms.
             assign_credit(conn, proposal.spec, verdict)
 
+            write_prompt_card(
+                round_dir / uid,
+                proposal.spec,
+                origin=proposal.origin,
+                J=f"{verdict.j:.4f}",
+                sep=f"{verdict.sep_min:+.4f}",
+                verdict=verdict.diagnose(),
+                far_cap=verdict.caption_far,
+                near_cap=verdict.caption_near,
+            )
             row = record_row(proposal, verdict, index, image_path, far_path)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()  # a killed run keeps every candidate it already paid for
@@ -301,6 +344,14 @@ def harvest(
                 save_image(far, far_path, padding=0)
 
                 verdict = judge.evaluate(image_256, spec)
+                write_prompt_card(
+                    out_dir,
+                    spec,
+                    origin="harvest",
+                    J=f"{verdict.j:.4f}",
+                    sep=f"{verdict.sep_min:+.4f}",
+                    verdict=verdict.diagnose(),
+                )
                 out_row: dict[str, Any] = json.loads(verdict.to_json())
                 out_row.update(
                     {

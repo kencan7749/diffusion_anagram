@@ -300,3 +300,65 @@ def test_harvest_top_zero_skips_harvesting_without_crashing(wired, capsys) -> No
     # Screening results and reports must still be complete.
     assert paths.contact_sheet.exists()
     assert paths.components.exists()
+
+
+def test_each_candidate_directory_explains_itself(wired) -> None:
+    """A directory named by a content hash says nothing on its own.
+
+    Cross-referencing scores.jsonl to find out what an image was is a step
+    nobody takes, so the prompts sit beside the images.
+    """
+    config, paths, conn, proposer, engine, judge = wired
+    run_loop(config, paths, conn, proposer, engine, judge)
+
+    rows = load_json_lines(paths.round_dir(0) / "scores.jsonl")
+    for row in rows:
+        card = Path(row["image_path"]).parent / "prompt.txt"
+        assert card.exists(), f"{card} missing"
+        text = card.read_text()
+        assert row["prompt_low"] in text
+        assert row["prompt_high"] in text
+        assert row["uid"] in text
+        assert row["diagnosis"] in text
+
+
+def test_harvested_candidates_get_a_card_too(wired) -> None:
+    config, paths, conn, proposer, engine, judge = wired
+    run_loop(config, paths, conn, proposer, engine, judge)
+
+    for row in load_json_lines(paths.harvest / "scores.jsonl"):
+        card = Path(row["image_path"]).parent / "prompt.txt"
+        assert card.exists()
+        assert f"seed   : {row['seed']}" in card.read_text()
+
+
+def test_card_is_written_before_generation(wired, tmp_path: Path) -> None:
+    """An interrupted candidate must still say what it was attempting."""
+    from ava.loop import write_prompt_card
+    from ava.spec import CandidateSpec
+
+    spec = CandidateSpec("a panda", "a barn", "an oil painting of", seed=3)
+    card = write_prompt_card(tmp_path / "uid", spec, origin="inject")
+    text = card.read_text()
+    assert "a panda" in text and "a barn" in text
+    assert "an oil painting of" in text
+    assert "seed   : 3" in text
+    # No verdict yet, and that must not break the format.
+    assert "J      :" not in text
+
+
+def test_backfill_is_idempotent_and_reads_only_scores(wired) -> None:
+    from scripts.backfill_prompts import backfill
+
+    config, paths, conn, proposer, engine, judge = wired
+    run_loop(config, paths, conn, proposer, engine, judge)
+
+    for card in paths.root.rglob("prompt.txt"):
+        card.unlink()
+    written, _ = backfill(paths.root)
+    assert written == config.rounds * config.k + len(
+        load_json_lines(paths.harvest / "scores.jsonl")
+    )
+
+    again, skipped = backfill(paths.root)
+    assert again == 0 and skipped > 0
