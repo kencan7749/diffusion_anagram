@@ -136,6 +136,22 @@ from the design note (yield at least v1's, more cells held) to two runs'
 files, and a v2 run's own `archive.jsonl` and `search_state.json` (coverage,
 surrogate skill per round, operator rewards) say how it is doing in use.
 
+## The audio flip
+
+The same search runs on the time-reversal anagram (`ava/audio/`): one sound
+that reads as one thing played forwards and another played backwards, sampled
+from Stable Audio Open with the Visual Anagrams construction and time reversal
+as the view, and scored by CLAP in both directions. The task `time_reverse` is
+registered beside the papers' tasks, its vocabulary is authored envelope
+prompts (decays and swells; there is no paper to quote from), and
+`ava.audio.loop` shares the proposers, the run layout and the reports with
+the image loop. The listening list is `audition.md`.
+
+```bash
+scripts/run_audio_flip_evolve.sh     # v2 search of the audio flip; ~12 s per candidate
+.venv/bin/python -m ava.audio.loop --run-id audio --rounds 6 -k 6 --proposer bandit
+```
+
 ## Layout
 
 ```
@@ -156,7 +172,8 @@ ava/          the pipeline
     engine.py     resident DeepFloyd generator, both papers' samplers
     judge.py      CLIP scoring, BLIP captions as evidence only
     paper_examples.py  prompts quoted from the papers, with figure citations
-  audio/        the time-reversal anagram track
+  audio/        the time-reversal anagram track (tasks, vocab, loop: the audio flip
+                search; engine, judge, perceive: Stable Audio, CLAP, the views)
 ava_vocab/    vocabulary generation from GPT-2 (see its README)
 scripts/      one-off analyses
 tests/
