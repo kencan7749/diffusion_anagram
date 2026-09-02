@@ -21,49 +21,6 @@
 - Code should prioritize clarity, reproducibility, and correctness.
 
 ---
-# Replication Routine (re:vision)
-
-This repo works through vision/fMRI papers for the **re:vision** initiative:
-reproduce each paper's method, then replicate it on the LAION-fMRI dataset
-(`laion_fmri`, installed from `external/LAION-fMRI`).
-
-- **Routine**: reproduce-then-replicate, following the principles below.
-  Progress is tracked in `analyses/README.md`. (A detailed internal phase
-  checklist is kept as local working state and is not part of this repo.)
-- **One folder per paper**: each paper is self-contained under
-  `analyses/<paper_slug>/` (copy `analyses/_template/`). It holds `proposal.md`
-  and `report.md` in re:vision format, paper-specific code in `analysis/`,
-  `run_replication.py`, `tests/`, `results/`, and `run_log.md`.
-- **Shared primitives**: cross-paper, re:vision-mandated logic lives in
-  `src/laion_revision/replication/` (within-subject permutation testing
-  in `permutation.py`; generalization splits in `generalization.py`). Import
-  these instead of duplicating them per paper. This package follows the
-  `__init__.py` policy below (no eager heavy imports; import from submodules).
-- **Shared code lives on `main` (iron rule)**: any logic reused across papers
-  belongs on `main`, never buried in a paper folder or paper branch. Reusable
-  **functions/modules** go in `src/laion_revision/...`; reusable **CLI/scripts**
-  go in `scripts/` (e.g. `scripts/build_beta_store.py` builds the canonical beta
-  store for any subject). Only paper-specific code lives in `analyses/<paper>/`
-  on that paper's branch. If you find yourself copying a helper into a second
-  paper, lift it to `src/`/`scripts/` on `main` and import it instead.
-- **re:vision constraints**: only 5 subjects → all statistics are
-  within-subject (group-level tests become non-parametric permutation tests,
-  corrected per subject). OOD images are decided per study (default: excluded
-  for replication, since OOD is for generalization) — record the decision and
-  reason in the paper's `README.md`.
-- **Default routine principles** (apply to every paper):
-  1. **Reproduce the original on its own data first** when a public
-     implementation/dataset exists (nilearn, PyMVPA, OpenNeuro), then port to
-     LAION-fMRI. Fall back to "re-implement + light sanity check" only when the
-     original data is hard to obtain.
-  2. **Reproduction and replication share the same core analysis functions** —
-     implement the analysis once and feed both original-data and LAION-fMRI
-     inputs through it; only the data-loading differs.
-  3. **Run sub-01 only first**, verify the pipeline, then scale to all 5
-     subjects (sub-01 finishes downloading first, so no need to wait for the
-     full dataset).
-
----
 # Workflow
 
 ## Plan Mode Default
