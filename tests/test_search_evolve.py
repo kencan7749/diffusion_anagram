@@ -351,3 +351,28 @@ def test_search_package_does_not_need_torch() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+# -- the summary script reads only what the run wrote --------------------------
+
+
+def test_search_summary_reads_the_persisted_run(tmp_path: Path) -> None:
+    from scripts.search_summary import summarise, to_markdown
+
+    config, paths, conn, proposer = run(tmp_path, "sum")
+    s = summarise(paths.root, top=10)
+    assert s["pairs"] == len(proposer.archive)
+    assert s["evaluations"] == config.rounds * config.k
+    assert set(s["coverage"]) <= set(TASKS)
+    assert s["elites"] and all(i["elite"] for i in s["elites"])
+    assert len(s["surrogate_log"]) == config.rounds
+    text = to_markdown(s)
+    for heading in (
+        "## Coverage",
+        "## Elites",
+        "## Racing",
+        "## Surrogate",
+        "## Operators",
+    ):
+        assert heading in text
+    conn.close()

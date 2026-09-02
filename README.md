@@ -117,10 +117,18 @@ they are the judge's own CLIP. A run is reproducible from its seed byte for
 byte (`archive.jsonl` included), and resumes from its persisted state.
 
 ```bash
+scripts/run_flip_evolve.sh      # flip with v2; ROUNDS, K, SEED, RACE_FRACTION, ... as env vars
 .venv/bin/python -m ava.loop --run-id evo --tasks flip,hybrid,jigsaw --rounds 12 --k 8 \
     --proposer evolve --harvest-seeds 0 --harvest-top 0
+.venv/bin/python -m scripts.search_summary --run runs/evo   # what the archive learned
 scripts/run_ab_search.sh        # v1 vs v2 at equal budget -> results/stepB/ab.md
 ```
+
+A v2 run leaves `archive.jsonl` (every pair with every seed, elite flag per
+cell), `clusters.npz` (the cell map) and `search_state.json` (operator
+statistics, the surrogate's skill log, duplicate-rejection statistics, a
+per-round summary) beside the usual files; `search_summary.md` reads them
+back as tables.
 
 v1 stays the default. Whether v2 should replace it is a question for
 measurement, not for the design: `scripts/ab_compare.py` applies the rule
