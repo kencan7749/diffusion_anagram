@@ -16,7 +16,8 @@ it; the fixed injection quota keeps new words entering at a bounded rate even
 once there are thousands of arms.
 
     ~50% exploit  Thompson sampling over the existing posteriors
-    ~25% inject   an arm that has never been tried, guaranteed
+    ~25% inject   an arm that has never been tried, guaranteed; words that
+                  only other tasks know count as untried here
     ~25% swap     last round's failures, resampling only the slots that
                   failed (keeping a working component is more sample-efficient
                   than redrawing the whole candidate)
@@ -38,7 +39,7 @@ import numpy as np
 
 from ava.image.tasks import STYLE, IllusionTask, get_task
 from ava.spec import CandidateSpec, RunState, Verdict
-from ava.vocab import Arm, list_arms, thompson_sample, untried_arms, update_arm
+from ava.vocab import Arm, draw_arm, ensure_arm, list_arms, untried_pool, update_arm
 
 # Origins recorded in candidates.jsonl so a round can be explained afterwards.
 EXPLOIT = "exploit"
@@ -227,6 +228,17 @@ class CandidateBuilder:
         self._task_cursor += 1
         return task
 
+    def reserved(self, task: IllusionTask) -> frozenset[str]:
+        """Words no searched slot may take: the reference prompt of an inverse task.
+
+        With the vocabulary pooled across tasks the reference subject is
+        drawable like any other word, and a candidate whose free slot repeats
+        the reference is not an illusion.
+        """
+        if task.ref_slot is not None and self.ref_prompt is not None:
+            return frozenset({self.ref_prompt})
+        return frozenset()
+
     def build(
         self, task: IllusionTask, words: dict[int, str], style: str
     ) -> CandidateSpec:
@@ -309,7 +321,8 @@ class BanditProposer:
     def _draw(
         self, task: IllusionTask, role: str, exclude: frozenset[str] = frozenset()
     ) -> Arm:
-        return thompson_sample(self.conn, task.name, role, self.rng, exclude=exclude)
+        # Over the pooled vocabulary: every task can try every word.
+        return draw_arm(self.conn, task.name, role, self.rng, exclude=exclude)
 
     def _fill(self, task: IllusionTask, fixed: dict[int, str]) -> dict[int, str]:
         """Draw a word for every searched slot not already fixed, all distinct."""
@@ -317,7 +330,7 @@ class BanditProposer:
         for i in task.searched_slots():
             if i in words:
                 continue
-            taken = frozenset(words.values())
+            taken = frozenset(words.values()) | self.builder.reserved(task)
             words[i] = self._draw(task, task.slots[i].role, exclude=taken).word
         return words
 
@@ -335,11 +348,10 @@ class BanditProposer:
         Thompson sampling when no distance function was supplied.
         """
         distance = self.text_distance
+        exclude = frozenset({avoid}) | self.builder.reserved(task)
         if distance is None:
-            return self._draw(task, role, exclude=frozenset({avoid})).word
-        candidates = [
-            self._draw(task, role, exclude=frozenset({avoid})).word for _ in range(8)
-        ]
+            return self._draw(task, role, exclude=exclude).word
+        candidates = [self._draw(task, role, exclude=exclude).word for _ in range(8)]
         return max(candidates, key=lambda w: distance(avoid, w))
 
     # -- the three proposal kinds ---------------------------------------
@@ -369,6 +381,7 @@ class BanditProposer:
         task_name, role = keys[int(self.rng.integers(len(keys)))]
         arms = pool[(task_name, role)]
         arm = arms.pop(int(self.rng.integers(len(arms))))
+        ensure_arm(self.conn, arm)  # a word from another task becomes an arm here
         task = get_task(task_name)
 
         if role == STYLE:
@@ -437,7 +450,11 @@ class BanditProposer:
         for task in self.tasks:
             roles = {task.slots[i].role for i in task.searched_slots()} | {STYLE}
             for role in sorted(roles):
-                pool[(task.name, role)] = untried_arms(self.conn, task.name, role)
+                pool[(task.name, role)] = [
+                    a
+                    for a in untried_pool(self.conn, task.name, role)
+                    if a.word not in self.builder.reserved(task)
+                ]
         for _ in range(n_inject):
             for _ in range(MAX_DRAW_ATTEMPTS):
                 built = self._inject_one(pool)
@@ -559,7 +576,7 @@ class UniformProposer:
             for _ in range(MAX_DRAW_ATTEMPTS):
                 words: dict[int, str] = {}
                 for i in task.searched_slots():
-                    taken = frozenset(words.values())
+                    taken = frozenset(words.values()) | self.builder.reserved(task)
                     words[i] = self._choose(task, task.slots[i].role, taken)
                 style = self._choose(task, STYLE, frozenset())
                 spec = self.builder.build(task, words, style)

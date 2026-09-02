@@ -17,6 +17,12 @@ The database lives at runs/vocab.db and is shared across runs on purpose. The
 accumulated estimate of which prompts work is the asset this system builds; a
 per-run reset would throw it away. Run-specific progress belongs in state.json.
 
+The vocabulary is shared across tasks as well (`pooled_arms`): a word that
+only `negate` knows is offered to `flip` at the uniform prior and registered
+under `flip` when first proposed there. The posteriors are not shared -- the
+whole point of the (word, task, role) key is that evidence from one view says
+nothing about another.
+
 Seeding policy: `source='author'` arms are strings that literally occur in
 dev/visual_anagrams (its tests/*.sh and readmes); `source='paper'` arms are
 prompts quoted verbatim from the two papers, each with a figure citation
@@ -406,9 +412,106 @@ def thompson_sample(
     rng: np.random.Generator,
     exclude: frozenset[str] = frozenset(),
 ) -> Arm:
-    """Draw one arm by Thompson sampling over the (task, role) Beta posteriors."""
+    """Draw one arm by Thompson sampling over the (task, role) Beta posteriors.
+
+    Registered arms only. The proposers draw through `draw_arm`, which also
+    sees the words other tasks know; this is the validation-sweep primitive.
+    """
     arms = [a for a in list_arms(conn, task, role) if a.word not in exclude]
     if not arms:
         raise LookupError(f"no available arms for ({task!r}, {role!r})")
     draws = rng.beta([a.alpha for a in arms], [a.beta for a in arms])
     return arms[int(np.argmax(draws))]
+
+
+# ---------------------------------------------------------------------------
+# The shared pool: every task can draw every word
+# ---------------------------------------------------------------------------
+
+POOLED_SOURCE = "pooled"
+
+
+def pooled_arms(conn: sqlite3.Connection, task: str, role: str) -> list[Arm]:
+    """The (task, role) arms plus every word another task knows, as untried arms.
+
+    Posteriors are per (word, task, role) and stay that way: what is shared is
+    the *vocabulary*, not the evidence. A word registered only under `negate`
+    (a paper example, a generated word) is offered to `flip` at the uniform
+    prior, and becomes a real arm of `flip` the moment it is proposed there
+    (`ensure_arm`). Styles pool with styles and subjects with subjects; a
+    hybrid's `low` word is a perfectly good `subject` for a flip, and the
+    data decides whether it was.
+    """
+    own = list_arms(conn, task, role)
+    known = {a.word for a in own}
+    clause = "role = ?" if role == STYLE else "role != ?"
+    rows = conn.execute(
+        f"SELECT word, MIN(task || ':' || role) AS origin FROM arm "
+        f"WHERE {clause} AND task != ? GROUP BY word ORDER BY word",
+        (STYLE, task),
+    ).fetchall()
+    pooled = [
+        Arm(
+            word=r["word"],
+            task=task,
+            role=role,
+            source=POOLED_SOURCE,
+            alpha=UNIFORM_PRIOR[0],
+            beta=UNIFORM_PRIOR[1],
+            n_trials=0,
+            first_seen_round=0,
+            citation=f"pooled from {r['origin']}",
+        )
+        for r in rows
+        if r["word"] not in known
+    ]
+    # One fixed order whatever has been registered so far, so a seeded draw
+    # gives the same word before and after a pooled arm becomes a real one.
+    return sorted(own + pooled, key=lambda a: a.word)
+
+
+def ensure_arm(conn: sqlite3.Connection, arm: Arm) -> bool:
+    """Register a pooled arm so credit has somewhere to land. Idempotent."""
+    return add_arm(
+        conn,
+        arm.word,
+        arm.task,
+        arm.role,
+        arm.source,
+        (arm.alpha, arm.beta),
+        arm.first_seen_round,
+        arm.citation,
+    )
+
+
+def draw_arm(
+    conn: sqlite3.Connection,
+    task: str,
+    role: str,
+    rng: np.random.Generator,
+    exclude: frozenset[str] = frozenset(),
+) -> Arm:
+    """Thompson-sample over the pooled vocabulary and register what was drawn.
+
+    The one deliberate write in a draw: a pooled word that wins the draw is
+    added to (task, role) at its prior, so the candidate built from it can be
+    credited. A word drawn and then discarded by the caller leaves an untried
+    arm behind, which is harmless and is exactly what an untried arm is.
+    """
+    arms = [a for a in pooled_arms(conn, task, role) if a.word not in exclude]
+    if not arms:
+        raise LookupError(f"no available arms for ({task!r}, {role!r})")
+    draws = rng.beta([a.alpha for a in arms], [a.beta for a in arms])
+    chosen = arms[int(np.argmax(draws))]
+    if chosen.source == POOLED_SOURCE:
+        ensure_arm(conn, chosen)
+    return chosen
+
+
+def untried_pool(conn: sqlite3.Connection, task: str, role: str) -> list[Arm]:
+    """Untried arms of (task, role), including the words only other tasks know.
+
+    What the injection quota and the `inject` operator draw from. Pooled arms
+    are not registered here; the caller registers the one it uses.
+    """
+    return [a for a in pooled_arms(conn, task, role) if a.n_trials == 0]

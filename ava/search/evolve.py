@@ -39,7 +39,7 @@ from typing import Any
 
 import numpy as np
 
-from ava.image.tasks import STYLE, IllusionTask
+from ava.image.tasks import STYLE, IllusionTask, get_task
 from ava.propose import MAX_DRAW_ATTEMPTS, CandidateBuilder, Proposal
 from ava.search.archive import Archive, Clusterer
 from ava.search.embed import CachingEmbedder, Embedder
@@ -55,7 +55,7 @@ from ava.search.operators import (
 from ava.search.racing import RACE, RacingConfig, race_proposals
 from ava.search.surrogate import FeatureMap, Surrogate, SurrogateConfig
 from ava.spec import CandidateSpec, RunState
-from ava.vocab import list_arms, thompson_sample
+from ava.vocab import draw_arm, pooled_arms
 
 BOOTSTRAP = "bootstrap"
 EVOLVE = "evolve"
@@ -89,9 +89,15 @@ class SearchConfig:
 
 
 def vocabulary_words(conn: sqlite3.Connection, tasks: Sequence[str]) -> list[str]:
-    """Every subject word registered for the configured tasks; styles excluded."""
+    """Every subject word any configured task can draw: the whole pooled vocabulary."""
     return sorted(
-        {a.word for t in tasks for a in list_arms(conn, t) if a.role != STYLE}
+        {
+            a.word
+            for t in tasks
+            for task in [get_task(t)]
+            for i in task.searched_slots()
+            for a in pooled_arms(conn, t, task.slots[i].role)
+        }
     )
 
 
@@ -268,11 +274,11 @@ class EvolutionaryProposer:
         words: dict[int, str] = {}
         try:
             for i in task.searched_slots():
-                taken = frozenset(words.values())
-                words[i] = thompson_sample(
+                taken = frozenset(words.values()) | self.builder.reserved(task)
+                words[i] = draw_arm(
                     self.conn, task.name, task.slots[i].role, self.rng, exclude=taken
                 ).word
-            style = thompson_sample(self.conn, task.name, STYLE, self.rng).word
+            style = draw_arm(self.conn, task.name, STYLE, self.rng).word
         except LookupError:
             return None
         detail = f"bootstrap task={task.name} " + " ".join(

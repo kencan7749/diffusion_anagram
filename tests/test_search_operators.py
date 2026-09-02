@@ -214,6 +214,8 @@ def test_inject_puts_an_untried_word_into_one_slot(ctx) -> None:
 
 
 def test_inject_returns_none_when_every_word_was_tried(ctx) -> None:
+    # Only flip's own arms remain: words other tasks know would pool in as untried.
+    ctx.conn.execute("DELETE FROM arm WHERE task != 'flip'")
     for a in list_arms(ctx.conn, "flip", "subject"):
         update_arm(ctx.conn, a.word, a.task, a.role, 0.5)
     parent = parent_of(ctx, flip("a horse", "a duck"), 0.9, 0.9)

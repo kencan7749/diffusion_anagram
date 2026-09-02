@@ -47,7 +47,11 @@ reference image and only the other slot is searched.
 Vocabulary arms are `(word, task, role)`. Factorized Diffusion slots are
 asymmetric (`low` / `high`, `gray` / `color`, `moving` / `still`), so each has
 its own role; Visual Anagrams slots are symmetric, so every slot shares the
-role `subject`. Seeds come from two traceable sources: strings that occur in
+role `subject`. The *words* are pooled across tasks: a prompt that only
+`negate` knows (a paper example, a generated word) is offered to `flip` at the
+uniform prior and registered under `flip` when first proposed there
+(`source = pooled`). The *evidence* is not pooled; that is the point of the
+key. Seeds come from two traceable sources: strings that occur in
 the upstream checkout (`author`), and prompts quoted verbatim from the papers
 with a figure citation (`paper`, `ava/image/paper_examples.py`). Paper seeds
 start from a uniform Beta(1, 1); the data decides.

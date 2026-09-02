@@ -6,9 +6,11 @@ injection with nothing untried left). Children are built through the same
 `CandidateBuilder` the v1 proposer uses, so the diffusion seed, guidance and
 step count are the run's screening settings whatever operator made the child.
 
-Words come out of the vocabulary database by Thompson sampling, which is how
-the v1 component posteriors keep steering v2: the archive decides *which pair*
-to mutate, the posteriors decide *which word* to try in its place.
+Words come out of the vocabulary database by Thompson sampling over the
+pooled vocabulary (`ava.vocab.draw_arm`), which is how the v1 component
+posteriors keep steering v2: the archive decides *which pair* to mutate, the
+posteriors decide *which word* to try in its place, and a word only another
+task knows is as available as one of the task's own.
 
 Operator choice is a UCB1 bandit rewarded by the child's improvement over its
 parent, so an operator that keeps producing better children gets used more,
@@ -29,7 +31,7 @@ from ava.image.tasks import STYLE, IllusionTask, get_task
 from ava.propose import CandidateBuilder
 from ava.search.archive import Archive, Individual, pair_key
 from ava.spec import CandidateSpec
-from ava.vocab import add_arm, thompson_sample, untried_arms
+from ava.vocab import add_arm, draw_arm, ensure_arm, untried_pool
 
 SWAP_SLOT = "swap_slot"
 CROSSOVER = "crossover"
@@ -77,7 +79,7 @@ def _draw(
     ctx: OperatorContext, task: IllusionTask, role: str, exclude: frozenset[str]
 ) -> str | None:
     try:
-        return thompson_sample(ctx.conn, task.name, role, ctx.rng, exclude=exclude).word
+        return draw_arm(ctx.conn, task.name, role, ctx.rng, exclude=exclude).word
     except LookupError:
         return None
 
@@ -131,7 +133,8 @@ def swap_slot(parent: Individual, ctx: OperatorContext) -> Child | None:
         i = lost[int(ctx.rng.integers(len(lost)))]
     else:
         i = min(task.searched_slots(), key=lambda j: latest.sep[j])
-    new = _draw(ctx, task, task.slots[i].role, frozenset(words.values()))
+    exclude = frozenset(words.values()) | ctx.builder.reserved(task)
+    new = _draw(ctx, task, task.slots[i].role, exclude)
     if new is None:
         return None
     old, words[i] = words[i], new
@@ -244,15 +247,17 @@ def inject(parent: Individual, ctx: OperatorContext) -> Child | None:
         for j in ctx.rng.permutation(len(task.searched_slots()))
     ]
     for i in order:
+        reserved = ctx.builder.reserved(task)
         pool = [
             a
-            for a in untried_arms(ctx.conn, task.name, task.slots[i].role)
-            if a.word not in words.values()
+            for a in untried_pool(ctx.conn, task.name, task.slots[i].role)
+            if a.word not in words.values() and a.word not in reserved
         ]
         if not pool:
             continue
         pool.sort(key=lambda a: a.word)
         arm = pool[int(ctx.rng.integers(len(pool)))]
+        ensure_arm(ctx.conn, arm)
         old, words[i] = words[i], arm.word
         return (
             ctx.builder.build(task, words, parent.spec.style),

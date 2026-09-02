@@ -151,3 +151,56 @@ def test_credible_interval_brackets_the_mean(conn) -> None:
     add_arm(conn, "a duck", T, "low", "test", prior=(8.0, 2.0))
     lo, hi = arm(conn, "a duck").credible_interval(np.random.default_rng(SEED))
     assert 0.0 <= lo < arm(conn, "a duck").mean < hi <= 1.0
+
+
+# -- the pooled vocabulary: every task can draw every word ------------------
+
+
+def test_pooled_arms_offer_other_tasks_words_at_the_prior(tmp_path: Path) -> None:
+    from ava.vocab import POOLED_SOURCE, pooled_arms
+
+    conn = connect(tmp_path / "vocab.db")
+    add_arm(conn, "a lighthouse", "negate", "subject", "paper", (3.0, 1.0))
+    add_arm(conn, "a horse", "flip", "subject", "author")
+    add_arm(conn, "a pop art of", "inner_circle", "style", "paper")
+    add_arm(conn, "", "flip", "style", "author")
+
+    arms = {a.word: a for a in pooled_arms(conn, "flip", "subject")}
+    assert arms["a horse"].source == "author"
+    lighthouse = arms["a lighthouse"]
+    assert lighthouse.source == POOLED_SOURCE and lighthouse.task == "flip"
+    assert (lighthouse.alpha, lighthouse.beta) == (1.0, 1.0), "evidence is per task"
+    assert "pooled from negate:subject" in lighthouse.citation
+    assert "a pop art of" not in arms, "styles do not pool into subjects"
+    styles = {a.word for a in pooled_arms(conn, "flip", "style")}
+    assert styles == {"", "a pop art of"}
+    conn.close()
+
+
+def test_draw_arm_registers_what_it_draws(tmp_path: Path) -> None:
+    from ava.vocab import draw_arm
+
+    conn = connect(tmp_path / "vocab.db")
+    add_arm(conn, "a lighthouse", "negate", "subject", "paper")
+    arm = draw_arm(conn, "flip", "subject", np.random.default_rng(0))
+    assert arm.word == "a lighthouse" and arm.task == "flip"
+    registered = list_arms(conn, "flip", "subject")
+    assert [a.word for a in registered] == ["a lighthouse"]
+    assert registered[0].n_trials == 0
+    update_arm(conn, "a lighthouse", "flip", "subject", 1.0)  # credit can land
+    # The negate arm is untouched.
+    assert list_arms(conn, "negate", "subject")[0].n_trials == 0
+    conn.close()
+
+
+def test_untried_pool_counts_other_tasks_words_as_untried(tmp_path: Path) -> None:
+    from ava.vocab import untried_arms, untried_pool
+
+    conn = connect(tmp_path / "vocab.db")
+    add_arm(conn, "a horse", "flip", "subject", "author")
+    update_arm(conn, "a horse", "flip", "subject", 0.5)
+    add_arm(conn, "a lighthouse", "negate", "subject", "paper")
+    update_arm(conn, "a lighthouse", "negate", "subject", 0.5)
+    assert untried_arms(conn, "flip", "subject") == []
+    assert [a.word for a in untried_pool(conn, "flip", "subject")] == ["a lighthouse"]
+    conn.close()

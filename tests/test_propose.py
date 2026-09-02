@@ -140,8 +140,13 @@ def test_every_proposal_records_its_origin(conn) -> None:
 
 
 def test_exploit_backfills_when_nothing_is_injectable(conn) -> None:
-    """With every arm tried, the injection quota is empty and exploit absorbs it."""
-    for a in list_arms(conn, "hybrid"):
+    """With every arm tried, the injection quota is empty and exploit absorbs it.
+
+    Only hybrid arms are left in the database: the vocabulary is pooled, so a
+    word another task knows would still count as injectable for hybrid.
+    """
+    conn.execute("DELETE FROM arm WHERE task != 'hybrid'")  # nothing to pool from
+    for a in list_arms(conn):
         update_arm(conn, a.word, a.task, a.role, 0.5)
     proposals = make_proposer(conn).propose(RunState(run_id="r"), 8)
     assert len(proposals) == 8
@@ -169,11 +174,29 @@ def test_va_candidates_fill_every_slot_from_the_subject_pool(conn) -> None:
         assert p.spec.ref_image is None
 
 
-def test_words_stay_inside_their_task(conn) -> None:
-    """A flip must only use words registered for flip."""
-    words = {a.word for a in list_arms(conn, "flip", "subject")}
+def test_proposed_words_are_arms_of_their_task(conn) -> None:
+    """Whatever a flip proposes is registered under flip by the time it is proposed.
+
+    The vocabulary is pooled across tasks, so a flip may draw a word only
+    another task knew; credit assignment then needs a (word, flip, role) arm.
+    """
     for p in make_proposer(conn, tasks=("flip",)).propose(RunState(run_id="r"), 8):
+        words = {a.word for a in list_arms(conn, "flip", "subject")}
         assert set(p.spec.prompts) <= words
+
+
+def test_a_word_only_another_task_knows_reaches_the_flip(conn) -> None:
+    """The reason for pooling: paper and generated words were stuck in one task."""
+    add_arm(conn, "a lighthouse keeper", "negate", "subject", "paper")
+    seen = set()
+    for _ in range(6):
+        for p in make_proposer(conn, tasks=("flip",)).propose(RunState(run_id="r"), 12):
+            seen |= set(p.spec.prompts)
+    assert "a lighthouse keeper" in seen
+    arm = next(
+        a for a in list_arms(conn, "flip", "subject") if a.word == "a lighthouse keeper"
+    )
+    assert arm.source == "pooled" and arm.n_trials == 0
 
 
 def test_reference_task_pins_the_reference_slot(conn) -> None:
