@@ -271,8 +271,16 @@ def test_provenance_records_seed_and_hyperparameters(tmp_path: Path) -> None:
 
     entry = json.loads(log.read_text().strip())
     for key in (
-        "model", "prompt", "seed", "temperature", "top_p", "draws",
-        "greedy", "utc", "arms_added", "draw",
+        "model",
+        "prompt",
+        "seed",
+        "temperature",
+        "top_p",
+        "draws",
+        "greedy",
+        "utc",
+        "arms_added",
+        "draw",
     ):
         assert key in entry, f"provenance is missing {key!r}"
     assert entry["arms_added"] == 9

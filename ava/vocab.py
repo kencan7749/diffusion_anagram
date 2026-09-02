@@ -241,9 +241,7 @@ def untried_arms(conn: sqlite3.Connection, role: Role) -> list[Arm]:
     return [_row_to_arm(r) for r in rows]
 
 
-def update_arm(
-    conn: sqlite3.Connection, word: str, role: Role, p: float
-) -> None:
+def update_arm(conn: sqlite3.Connection, word: str, role: Role, p: float) -> None:
     """Fold one observation into the arm's posterior.
 
     `p` is already a probability in [0, 1] (p_far for a low arm, p_near for a

@@ -80,9 +80,7 @@ def build_sheet(rows: list[dict[str, Any]], out: Path) -> Path:
 
         # near view: identical across far_modes, so draw it once
         near = (
-            Image.open(str(any_row["image_path"]))
-            .convert("RGB")
-            .resize((CELL, CELL))
+            Image.open(str(any_row["image_path"])).convert("RGB").resize((CELL, CELL))
         )
         sheet.paste(near, (LEFT, y))
         draw.text(
@@ -96,9 +94,7 @@ def build_sheet(rows: list[dict[str, Any]], out: Path) -> Path:
             r = case_rows[mode]
             x = LEFT + ci * (CELL + PAD)
             far = (
-                Image.open(str(r["far_image_path"]))
-                .convert("RGB")
-                .resize((CELL, CELL))
+                Image.open(str(r["far_image_path"])).convert("RGB").resize((CELL, CELL))
             )
             sheet.paste(far, (x, y))
             draw.text(
