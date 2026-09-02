@@ -30,9 +30,9 @@ from itertools import combinations
 from typing import Any
 
 import numpy as np
-from numpy.typing import ArrayLike
 
 from ava.image.tasks import STYLE, get_task
+from ava.rankstats import spearman
 from ava.search.embed import Embedder
 from ava.spec import CandidateSpec
 from ava.vocab import list_arms
@@ -58,36 +58,6 @@ class SurrogateConfig:
             raise ValueError("noise must be positive")
         if self.window < 1 or self.min_train < 2:
             raise ValueError("window must be >= 1 and min_train >= 2")
-
-
-# ---------------------------------------------------------------------------
-# Rank correlation
-# ---------------------------------------------------------------------------
-
-
-def _ranks(x: np.ndarray) -> np.ndarray:
-    """Average ranks, so ties do not break the correlation."""
-    order = np.argsort(x, kind="stable")
-    ranks = np.empty(len(x), dtype=np.float64)
-    i = 0
-    while i < len(x):
-        j = i
-        while j + 1 < len(x) and x[order[j + 1]] == x[order[i]]:
-            j += 1
-        ranks[order[i : j + 1]] = 0.5 * (i + j) + 1.0
-        i = j + 1
-    return ranks
-
-
-def spearman(a: ArrayLike, b: ArrayLike) -> float:
-    """Spearman's rho; 0.0 when either side is constant."""
-    x, y = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
-    if len(x) != len(y) or len(x) < 2:
-        raise ValueError("need two sequences of equal length >= 2")
-    rx, ry = _ranks(x), _ranks(y)
-    if rx.std() == 0.0 or ry.std() == 0.0:
-        return 0.0
-    return float(np.corrcoef(rx, ry)[0, 1])
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ava.rankstats import spearman
 from ava.search.embed import CachingEmbedder, cosine
 from ava.search.surrogate import (
     UCB,
@@ -15,7 +16,6 @@ from ava.search.surrogate import (
     GaussianProcess,
     Surrogate,
     SurrogateConfig,
-    spearman,
 )
 from ava.spec import CandidateSpec
 from ava.vocab import connect, seed_author_vocab, update_arm
@@ -52,23 +52,6 @@ def all_pairs(task: str = "flip") -> list[CandidateSpec]:
                 out.append(CandidateSpec(task, (a, b), STYLES[k % len(STYLES)]))
                 k += 1
     return out
-
-
-# -- spearman -------------------------------------------------------------
-
-
-def test_spearman_hand_examples() -> None:
-    assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == pytest.approx(1.0)
-    assert spearman([1, 2, 3, 4], [40, 30, 20, 10]) == pytest.approx(-1.0)
-    # Ranks (1, 2, 3, 4) vs (2, 1, 4, 3): rho = 1 - 6 * 4 / (4 * 15) = 0.6
-    assert spearman([1, 2, 3, 4], [2, 1, 4, 3]) == pytest.approx(0.6)
-    assert spearman([1, 2, 3], [5, 5, 5]) == 0.0
-    with pytest.raises(ValueError):
-        spearman([1], [2])
-
-
-def test_spearman_averages_ties() -> None:
-    assert spearman([1, 1, 2, 3], [1, 2, 3, 4]) == pytest.approx(0.9486833, abs=1e-6)
 
 
 # -- features -------------------------------------------------------------
