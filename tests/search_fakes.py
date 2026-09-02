@@ -21,7 +21,7 @@ from ava.spec import CandidateSpec, Verdict
 DIM = 16
 
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "animal": ("a horse", "horse", "a duck", "a rabbit", "a lemur", "a kangaroo"),
+    "animal": ("a horse", "a duck", "a rabbit", "a lemur", "a kangaroo"),
     "face": ("marilyn monroe", "albert einstein", "an old man", "a tudor portrait"),
     "scene": (
         "a landscape",
@@ -32,6 +32,10 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "thing": ("houseplants", "a skull", "a teddy bear", "a panda"),
 }
+
+
+# Near-duplicates: the word on the left is the one on the right, plus a nudge.
+SYNONYMS: dict[str, str] = {"horse": "a horse", "einstein": "albert einstein"}
 
 
 def _unit(seed_text: str, dim: int = DIM) -> np.ndarray:
@@ -49,24 +53,34 @@ class FakeEmbedder:
     cosine of 0.7 in 16 dimensions, which is a bad fixture, not a bad k-means.
     """
 
-    def __init__(self, spread: float = 0.15, dim: int = DIM) -> None:
+    def __init__(
+        self, spread: float = 0.5, synonym_spread: float = 0.1, dim: int = DIM
+    ) -> None:
         self.spread = spread
+        self.synonym_spread = synonym_spread
         self.dim = dim
         self.calls = 0
         self._category_of = {w: c for c, words in CATEGORIES.items() for w in words}
 
-    def __call__(self, prompts: Sequence[str]) -> np.ndarray:
-        self.calls += 1
-        rows = []
-        for p in prompts:
-            category = self._category_of.get(p)
+    def _vector(self, word: str) -> np.ndarray:
+        base = SYNONYMS.get(word)
+        if base is not None:
+            v = self._vector(base) + self.synonym_spread * _unit(
+                "word:" + word, self.dim
+            )
+        else:
+            category = self._category_of.get(word)
             if category is None:
-                v = _unit("word:" + p, self.dim)
+                v = _unit("word:" + word, self.dim)
             else:
                 axis = np.zeros(self.dim)
                 axis[list(CATEGORIES).index(category)] = 1.0
-                v = axis + self.spread * _unit("word:" + p, self.dim)
-            rows.append(v / np.linalg.norm(v))
+                v = axis + self.spread * _unit("word:" + word, self.dim)
+        return v / np.linalg.norm(v)
+
+    def __call__(self, prompts: Sequence[str]) -> np.ndarray:
+        self.calls += 1
+        rows = [self._vector(p) for p in prompts]
         return np.stack(rows) if rows else np.zeros((0, self.dim))
 
 
