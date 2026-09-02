@@ -182,6 +182,7 @@ def candidate_view(row: dict[str, Any], round_dir: str) -> dict[str, Any]:
         "diagnosis": row.get("diagnosis", ""),
         "holds": list(row.get("holds", [])),
         "j": row.get("j"),
+        "p": list(row.get("p", [])),
         "sep": list(row.get("sep", [])),
         "sep_min": row.get("sep_min", min(row["sep"]) if row.get("sep") else None),
         "alignment": row.get("alignment"),
