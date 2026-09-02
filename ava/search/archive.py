@@ -20,7 +20,7 @@ flag is derived from it.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -461,5 +461,5 @@ class Archive:
     def __len__(self) -> int:
         return len(self.individuals)
 
-    def __iter__(self) -> Iterable[Individual]:
+    def __iter__(self) -> Iterator[Individual]:
         return iter(self.individuals.values())

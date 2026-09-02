@@ -130,6 +130,21 @@ def test_transpose_swaps_two_slots(ctx) -> None:
     assert child.task == "hybrid"
 
 
+def test_transpose_registers_words_under_their_new_roles(ctx) -> None:
+    """`an old man` is a hybrid `low` word; transposed, it needs a `high` arm."""
+    assert not [
+        a for a in list_arms(ctx.conn, "hybrid", "high") if a.word == "an old man"
+    ]
+    spec = CandidateSpec("hybrid", ("an old man", "houseplants"))
+    child, _ = must(transpose(parent_of(ctx, spec, 0.9, 0.9), ctx))
+    assert child.prompts == ("houseplants", "an old man")
+    high = {a.word: a for a in list_arms(ctx.conn, "hybrid", "high")}
+    low = {a.word: a for a in list_arms(ctx.conn, "hybrid", "low")}
+    assert high["an old man"].source == TRANSFER_SOURCE
+    assert low["houseplants"].source == TRANSFER_SOURCE
+    assert low["an old man"].source == "author", "the original arm is untouched"
+
+
 def test_transpose_never_returns_the_identity_for_three_slots(ctx) -> None:
     spec = CandidateSpec("three_view", ("a horse", "a duck", "a skull"), "")
     parent = parent_of(ctx, spec, 0.9, 0.9, 0.9)

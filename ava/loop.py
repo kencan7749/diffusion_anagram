@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,9 @@ from ava.report import (
     write_components,
     write_round_report,
 )
+from ava.search.evolve import EvolutionaryProposer, SearchConfig
+from ava.search.racing import RacingConfig
+from ava.search.surrogate import SurrogateConfig
 from ava.spec import (
     JIGSAW_SEED,
     KERNEL_SIZE,
@@ -74,6 +78,7 @@ from ava.vocab import connect, seed_author_vocab
 DEFAULT_RUNS_DIR = Path("runs")
 VOCAB_FILENAME = "vocab.db"
 DEFAULT_TASKS = ("hybrid",)
+PROPOSERS = ("bandit", "evolve", "uniform")
 
 # Recorded in config.yaml, not adjustable: the search space is prompts only.
 VIEW_PARAMS: dict[str, float | int] = {
@@ -122,12 +127,34 @@ class LoopConfig:
     # that describe it for the judge.
     ref_image: str | None = None
     ref_prompt: str | None = None
+    # Which search drives the rounds: the v1 component bandit, the v2
+    # evolutionary search (`ava.search`), or a uniform validation sweep.
+    proposer: str = "bandit"
+    # The evolutionary proposer's knobs, recorded whatever proposer runs so a
+    # config file always says what a `--proposer evolve` run would have used.
+    search: dict[str, Any] = field(default_factory=lambda: SearchConfig().to_dict())
     view_params: dict[str, float | int] = field(
         default_factory=lambda: dict(VIEW_PARAMS), init=False
     )
 
+    def __post_init__(self) -> None:
+        if self.proposer not in PROPOSERS:
+            raise ValueError(
+                f"proposer must be one of {PROPOSERS}, got {self.proposer}"
+            )
+
     def mix(self) -> ProposalMix:
         return ProposalMix(inject=self.inject, swap=self.swap)
+
+    def search_config(self) -> SearchConfig:
+        d = dict(self.search)
+        return SearchConfig(
+            **{
+                **d,
+                "racing": RacingConfig(**d["racing"]),
+                "surrogate": SurrogateConfig(**d["surrogate"]),
+            }
+        )
 
 
 @dataclass
@@ -543,13 +570,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="what the reference image shows, for the judge (e.g. 'albert einstein')",
     )
     p.add_argument(
+        "--proposer",
+        choices=PROPOSERS,
+        default="bandit",
+        help=(
+            "bandit: the v1 component bandit (Thompson sampling, injection, "
+            "targeted swaps). evolve: the v2 quality-diversity search "
+            "(MAP-Elites archive, racing, surrogate; see ava/search). uniform: a "
+            "validation sweep that samples every arm equally, not a search"
+        ),
+    )
+    p.add_argument(
         "--uniform",
         action="store_true",
-        help=(
-            "sample components uniformly instead of by posterior. A validation "
-            "sweep, not a search: it gives every arm comparable evidence so the "
-            "component ranking reflects measurements rather than priors"
-        ),
+        help="alias for --proposer uniform",
+    )
+    search = p.add_argument_group("evolve", "options for --proposer evolve")
+    defaults = SearchConfig()
+    search.add_argument(
+        "--clusters",
+        type=int,
+        default=defaults.clusters,
+        help="k-means clusters per prompt slot for the archive's cells",
+    )
+    search.add_argument(
+        "--eta",
+        type=float,
+        default=defaults.eta,
+        help="reject a child whose prompts are within this cosine of an evaluated pair",
+    )
+    search.add_argument(
+        "--race-fraction",
+        type=float,
+        default=defaults.racing.fraction,
+        help="share of each round spent re-seeding pairs that keep holding",
+    )
+    search.add_argument(
+        "--max-seeds",
+        type=int,
+        default=defaults.racing.max_seeds,
+        help="seeds a pair can accumulate through racing",
+    )
+    search.add_argument(
+        "--children-per-slot",
+        type=int,
+        default=defaults.children_per_slot,
+        help="children generated per candidate selected (the surrogate's pool)",
     )
     p.add_argument(
         "--no-blip",
@@ -564,6 +630,14 @@ def main(argv: list[str] | None = None) -> None:
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
     for t in tasks:
         get_task(t)  # fail early on a typo, before any model is loaded
+    proposer_name = "uniform" if args.uniform else args.proposer
+    search_cfg = SearchConfig(
+        clusters=args.clusters,
+        cluster_seed=args.seed,
+        eta=args.eta,
+        children_per_slot=args.children_per_slot,
+        racing=RacingConfig(max_seeds=args.max_seeds, fraction=args.race_fraction),
+    )
     config = LoopConfig(
         run_id=args.run_id,
         tasks=tasks,
@@ -581,6 +655,8 @@ def main(argv: list[str] | None = None) -> None:
         device=args.device,
         ref_image=args.ref_image,
         ref_prompt=args.ref_prompt,
+        proposer=proposer_name,
+        search=search_cfg.to_dict(),
     )
 
     # The vocabulary database is shared across runs on purpose: the posteriors
@@ -591,8 +667,36 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[vocab] seeded {added} arms")
 
     paths = RunPaths(args.runs_dir / args.run_id)
+    engine = Engine(device=config.device)
+    judge = ClipBlipJudge(device=config.device, use_blip=not args.no_blip)
+
     proposer: Proposer
-    if args.uniform:
+    if config.proposer == "evolve":
+        print("[proposer] evolutionary search (archive, racing, surrogate)")
+        if config.harvest_seeds > 0:
+            print(
+                "[note] racing already re-seeds pairs that hold; --harvest-seeds "
+                f"{config.harvest_seeds} adds a harvest pass on top of that"
+            )
+
+        def embed(prompts: Sequence[str]) -> np.ndarray:
+            # The judge's CLIP text tower: one model for scoring and for search.
+            return judge.text_embeddings(list(prompts)).cpu().numpy()
+
+        proposer = EvolutionaryProposer(
+            conn,
+            np.random.default_rng(args.seed),
+            embed,
+            tasks=config.tasks,
+            cfg=search_cfg,
+            screening_seed=config.screening_seed,
+            guidance_scale=config.guidance_scale,
+            num_inference_steps=config.num_inference_steps,
+            ref_image=config.ref_image,
+            ref_prompt=config.ref_prompt,
+            state_dir=paths.root,
+        )
+    elif config.proposer == "uniform":
         print("[proposer] uniform sampling (validation sweep, not a search)")
         proposer = UniformProposer(
             conn,
@@ -616,8 +720,6 @@ def main(argv: list[str] | None = None) -> None:
             ref_image=config.ref_image,
             ref_prompt=config.ref_prompt,
         )
-    engine = Engine(device=config.device)
-    judge = ClipBlipJudge(device=config.device, use_blip=not args.no_blip)
 
     run_loop(config, paths, conn, proposer, engine, judge)
 

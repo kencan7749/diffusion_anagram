@@ -86,6 +86,32 @@ def _describe(task: IllusionTask, words: dict[int, str]) -> str:
     return " ".join(f"{task.slots[i].name}={words[i]!r}" for i in sorted(words))
 
 
+def _register(
+    ctx: OperatorContext,
+    task: IllusionTask,
+    words: dict[int, str],
+    style: str,
+    citation: str,
+) -> None:
+    """Make sure every (word, task, role) the child draws on is an arm.
+
+    An operator that moves a word into a role it was never registered for
+    (a transfer to another task, a transpose of an asymmetric task) would
+    otherwise leave credit assignment with nowhere to put the evidence.
+    Existing arms are untouched; new ones carry `source='transfer'`.
+    """
+    for i, word in words.items():
+        add_arm(
+            ctx.conn,
+            word,
+            task.name,
+            task.slots[i].role,
+            TRANSFER_SOURCE,
+            citation=citation,
+        )
+    add_arm(ctx.conn, style, task.name, STYLE, TRANSFER_SOURCE, citation=citation)
+
+
 # ---------------------------------------------------------------------------
 # The six operators
 # ---------------------------------------------------------------------------
@@ -175,6 +201,8 @@ def transpose(parent: Individual, ctx: OperatorContext) -> Child | None:
         searched[a]: parent.spec.prompts[searched[int(perm[a])]]
         for a in range(len(searched))
     }
+    if not task.symmetric:
+        _register(ctx, task, words, parent.spec.style, f"transposed within {task.name}")
     return (
         ctx.builder.build(task, words, parent.spec.style),
         f"transpose {_describe(task, words)}",
@@ -200,24 +228,7 @@ def transfer_task(parent: Individual, ctx: OperatorContext) -> Child | None:
         return None
     target = targets[int(ctx.rng.integers(len(targets)))]
     words = {i: parent.spec.prompts[i] for i in target.searched_slots()}
-    citation = f"transferred from {task.name}"
-    for i, word in words.items():
-        add_arm(
-            ctx.conn,
-            word,
-            target.name,
-            target.slots[i].role,
-            TRANSFER_SOURCE,
-            citation=citation,
-        )
-    add_arm(
-        ctx.conn,
-        parent.spec.style,
-        target.name,
-        STYLE,
-        TRANSFER_SOURCE,
-        citation=citation,
-    )
+    _register(ctx, target, words, parent.spec.style, f"transferred from {task.name}")
     return (
         ctx.builder.build(target, words, parent.spec.style),
         f"transfer_task {task.name}->{target.name}",
