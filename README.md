@@ -48,13 +48,21 @@ figures redrawn without regenerating an image.
 ```
 ava/          the pipeline
   spec.py       candidates, verdicts, run state
-  engine.py     resident DeepFloyd generator (bit-identical to generate.py)
-  perceive.py   the far / near views a human sees
-  judge.py      CLIP scoring, BLIP captions as evidence only
+  metric.py     J = min(both views hold), shared by both tracks
   vocab.py      the (word, role) bandit arms and their Beta posteriors
   propose.py    what to try next, and per-component credit assignment
   report.py     contact sheet and component ranking
   loop.py       orchestration (CLI entry point)
+  image/        the hybrid-image track
+    engine.py     resident DeepFloyd generator (bit-identical to generate.py)
+    perceive.py   the far / near views a human sees
+    judge.py      CLIP scoring, BLIP captions as evidence only
+  audio/        the time-reversal anagram track
+    signals.py    deterministic probe signals
+    perceive.py   the forward / reversed views a listener hears
+    features.py   descriptors that say what a signal contains
+    judge.py      CLAP scoring
+    wavfile.py    16-bit PCM writing, on the standard library
 ava_vocab/    vocabulary generation from GPT-2 (see its README)
 scripts/      one-off analyses
 tests/

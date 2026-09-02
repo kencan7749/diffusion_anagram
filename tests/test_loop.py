@@ -16,7 +16,7 @@ import pytest
 import torch
 from PIL import Image
 
-from ava.judge import to_pil  # noqa: F401  (kept: asserts the import graph is sane)
+from ava.image.judge import to_pil  # noqa: F401  (asserts the import graph is sane)
 from ava.loop import LoopConfig, RunPaths, run_loop
 from ava.propose import BanditProposer
 from ava.spec import CandidateSpec, Verdict
@@ -75,9 +75,7 @@ def wired(tmp_path: Path):
     seed_author_vocab(conn)
     config = LoopConfig(run_id="t", rounds=2, k=4, harvest_seeds=2)
     paths = RunPaths(tmp_path / "runs" / "t")
-    proposer = BanditProposer(
-        conn, np.random.default_rng(SEED), mix=config.mix()
-    )
+    proposer = BanditProposer(conn, np.random.default_rng(SEED), mix=config.mix())
     yield config, paths, conn, proposer, FakeGenerator(), FakeJudge()
     conn.close()
 
@@ -117,9 +115,21 @@ def test_scores_carry_everything_a_figure_needs(wired) -> None:
 
     row = json.loads((paths.round_dir(0) / "scores.jsonl").read_text().splitlines()[0])
     for key in (
-        "j", "p_far", "p_near", "sep_far", "sep_near", "diagnosis",
-        "prompt_low", "prompt_high", "style", "seed", "origin", "detail",
-        "image_path", "far_image_path", "round",
+        "j",
+        "p_far",
+        "p_near",
+        "sep_far",
+        "sep_near",
+        "diagnosis",
+        "prompt_low",
+        "prompt_high",
+        "style",
+        "seed",
+        "origin",
+        "detail",
+        "image_path",
+        "far_image_path",
+        "round",
     ):
         assert key in row, f"scores.jsonl is missing {key!r}"
     assert Path(row["image_path"]).exists()

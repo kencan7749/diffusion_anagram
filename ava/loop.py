@@ -32,9 +32,9 @@ from typing import Any
 import numpy as np
 import yaml
 
-from .engine import Engine, Generator, save_sample
-from .judge import ClipBlipJudge, Judge
-from .propose import (
+from ava.image.engine import Engine, Generator, save_sample
+from ava.image.judge import ClipBlipJudge, Judge
+from ava.propose import (
     BanditProposer,
     Proposal,
     ProposalMix,
@@ -42,15 +42,15 @@ from .propose import (
     UniformProposer,
     assign_credit,
 )
-from .report import (
+from ava.report import (
     build_contact_sheet,
     load_scores,
     rank_score,
     write_components,
     write_round_report,
 )
-from .spec import SIGMA, CandidateSpec, RunState, Verdict
-from .vocab import connect, seed_author_vocab
+from ava.spec import SIGMA, CandidateSpec, RunState, Verdict
+from ava.vocab import connect, seed_author_vocab
 
 DEFAULT_RUNS_DIR = Path("runs")
 VOCAB_FILENAME = "vocab.db"
@@ -123,8 +123,7 @@ def load_state(paths: RunPaths, run_id: str) -> RunState:
     if paths.state.exists():
         state = RunState.from_json(paths.state.read_text(encoding="utf-8"))
         print(
-            f"[resume] round {state.round_index}, "
-            f"{len(state.evaluated_uids)} evaluated"
+            f"[resume] round {state.round_index}, {len(state.evaluated_uids)} evaluated"
         )
         return state
     return RunState(run_id=run_id)

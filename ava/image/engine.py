@@ -21,7 +21,7 @@ from torchvision.utils import save_image
 from visual_anagrams.samplers import sample_stage_1, sample_stage_2
 from visual_anagrams.views.view_hybrid import HybridHighPassView, HybridLowPassView
 
-from .spec import KERNEL_SIZE, REDUCTION, SIGMA, CandidateSpec
+from ava.spec import KERNEL_SIZE, REDUCTION, SIGMA, CandidateSpec
 
 STAGE_1_ID = "DeepFloyd/IF-I-M-v1.0"
 STAGE_2_ID = "DeepFloyd/IF-II-M-v1.0"

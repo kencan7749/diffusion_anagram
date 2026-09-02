@@ -2,12 +2,9 @@
 
 Structurally identical to `ava/judge.py`: build a 2x2 matrix of
 cosine similarities, S[view][prompt], with both axes ordered the same way, and
-turn it into two probabilities and their minimum. `scores_to_probs` is
-imported from the image judge rather than rewritten -- the arithmetic is a
-two-way softmax over a score matrix and has nothing to do with pixels. (If the
-audio loop gets built, that function should move to a neutral module; doing it
-now would mean editing the working image pipeline before this gate has even
-been passed.)
+and hand it to `ava.metric.scores_to_probs`, shared with the image track:
+turning a score matrix into two probabilities and their minimum is a two-way
+softmax and has nothing to do with pixels.
 
 What this measures is narrower than it looks, and the distinction matters:
 
@@ -27,11 +24,10 @@ import torch
 import torch.nn.functional as F
 
 from ava.audio.perceive import forward_view, reverse_view
-from ava.judge import scores_to_probs
 
 CLAP_ID = "laion/clap-htsat-unfused"
 
-__all__ = ["CLAP_ID", "ClapJudge", "scores_to_probs"]
+__all__ = ["CLAP_ID", "ClapJudge"]
 
 
 class ClapJudge:

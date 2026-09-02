@@ -20,7 +20,7 @@ Perception of a hybrid image:
 import torch
 import torchvision.transforms.functional as TF
 
-from .spec import KERNEL_SIZE, SIGMA
+from ava.spec import KERNEL_SIZE, SIGMA
 
 
 def blur_params(size: int) -> tuple[int, float]:

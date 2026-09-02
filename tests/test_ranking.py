@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from ava.judge import scores_to_probs
+from ava.metric import scores_to_probs
 from ava.report import rank_score
 from ava.spec import Verdict
 

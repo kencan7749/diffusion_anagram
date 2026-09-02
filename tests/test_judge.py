@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from ava.judge import scores_to_probs
-from ava.perceive import blur_params, far_view, far_view_resize, near_view
+from ava.image.perceive import blur_params, far_view, far_view_resize, near_view
+from ava.metric import scores_to_probs
 from ava.spec import KERNEL_SIZE, SIGMA, CandidateSpec, Verdict
 
 # CLIP ViT-L/14 ships logit_scale = ln(100), so exp() is 100.
@@ -133,7 +133,7 @@ def test_far_view_removes_high_frequency_energy(far_fn) -> None:
 @pytest.mark.slow
 def test_known_good_example_scores_above_chance() -> None:
     """Step 0-1. Requires CUDA and the CLIP/BLIP weights."""
-    from ava.judge import ClipBlipJudge, load_image
+    from ava.image.judge import ClipBlipJudge, load_image
 
     if not SMOKE_IMAGE.exists():
         pytest.skip(f"{SMOKE_IMAGE} not generated")

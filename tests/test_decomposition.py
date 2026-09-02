@@ -8,7 +8,7 @@ score downstream would be measuring the wrong thing.
 import pytest
 import torch
 
-from ava.engine import hybrid_views
+from ava.image.engine import hybrid_views
 from ava.spec import KERNEL_SIZE, SIGMA
 
 SEED = 0

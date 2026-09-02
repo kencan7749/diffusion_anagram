@@ -39,8 +39,8 @@ from typing import Any
 import torch
 from torchvision.utils import save_image
 
-from ava.engine import Engine, save_sample
-from ava.judge import ClipBlipJudge, load_image
+from ava.image.engine import Engine, save_sample
+from ava.image.judge import ClipBlipJudge, load_image
 from ava.spec import SIGMA, CandidateSpec
 
 # The known-good example already in results/hybrid_smoke, reproduced here so
@@ -82,9 +82,7 @@ class Step0Paths:
 
 def generate_cases(paths: Step0Paths, device: str) -> dict[str, Path]:
     """Generate one image per sigma, reusing any that already exist."""
-    wanted = {
-        label: paths.images / label / "sample_256.png" for label, _, _ in CASES
-    }
+    wanted = {label: paths.images / label / "sample_256.png" for label, _, _ in CASES}
     todo = [(label, sigma) for label, sigma, _ in CASES if not wanted[label].exists()]
     if not todo:
         print("[generate] all images present, skipping generation")
@@ -172,9 +170,9 @@ def check_gate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         v["sign_ok"] and v["separation_ok"] for v in modes.values()
     )
     # The plan requires that the conclusion not depend on which far view is used.
-    summary["far_modes_agree"] = len(
-        {(v["sign_ok"], v["separation_ok"]) for v in modes.values()}
-    ) == 1
+    summary["far_modes_agree"] = (
+        len({(v["sign_ok"], v["separation_ok"]) for v in modes.values()}) == 1
+    )
     return summary
 
 

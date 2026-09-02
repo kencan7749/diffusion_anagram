@@ -39,10 +39,11 @@ from typing import Any
 import numpy as np
 
 from ava.audio.features import describe, rms_profile
-from ava.audio.judge import CLAP_ID, ClapJudge, scores_to_probs
+from ava.audio.judge import CLAP_ID, ClapJudge
 from ava.audio.perceive import forward_view, reverse_view
 from ava.audio.signals import DURATION, NOISE_SEED, PROBES, SAMPLE_RATE
 from ava.audio.wavfile import write_wav
+from ava.metric import scores_to_probs
 
 # Two phrasings per contrast, and every pair is run against every signal.
 # One wording deciding the answer would be a finding about that wording.

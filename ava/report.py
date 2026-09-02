@@ -26,7 +26,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from visual_anagrams.utils import get_courier_font_path
 
-from .vocab import ROLES, Arm, Role, list_arms
+from ava.vocab import ROLES, Arm, Role, list_arms
 
 CELL = 192
 PAD = 8
@@ -48,15 +48,15 @@ ROLE_SIGNAL: dict[Role, str] = {
 def rank_score(row: dict[str, Any]) -> float:
     """Order candidates by the weaker raw CLIP margin, not by J.
 
-Ordering by this is equivalent to ordering by J -- a two-way softmax is a
-    sigmoid of the margin, so J == sigmoid(logit_scale * sep_min) -- but it is
-    readable and it does not run out of precision. A sweep's top 13 all printed
-    as J >= 0.99 while their margins spanned +0.048 to +0.114, and past a margin
-    of roughly 0.37 the sigmoid saturates to exactly 1.0 in float64, at which
-    point a top-N selection really would be picking among ties.
+    Ordering by this is equivalent to ordering by J -- a two-way softmax is a
+        sigmoid of the margin, so J == sigmoid(logit_scale * sep_min) -- but it is
+        readable and it does not run out of precision. A sweep's top 13 all printed
+        as J >= 0.99 while their margins spanned +0.048 to +0.114, and past a margin
+        of roughly 0.37 the sigmoid saturates to exactly 1.0 in float64, at which
+        point a top-N selection really would be picking among ties.
 
-    J still decides whether a candidate is shown at all. Screening wants the
-    saturated signal; the ordering does not.
+        J still decides whether a candidate is shown at all. Screening wants the
+        saturated signal; the ordering does not.
     """
     if "sep_min" in row:
         return float(row["sep_min"])
@@ -137,11 +137,7 @@ def build_contact_sheet(
         y = banner + PAD + (i // columns) * (cell_h + PAD)
 
         near = Image.open(str(row["image_path"])).convert("RGB").resize((cell, cell))
-        far = (
-            Image.open(str(row["far_image_path"]))
-            .convert("RGB")
-            .resize((cell, cell))
-        )
+        far = Image.open(str(row["far_image_path"])).convert("RGB").resize((cell, cell))
         sheet.paste(near, (x, y))
         sheet.paste(far, (x, y + cell))
 
@@ -223,9 +219,7 @@ def write_components(
     return out
 
 
-def write_round_report(
-    rows: list[dict[str, Any]], out: Path, round_index: int
-) -> Path:
+def write_round_report(rows: list[dict[str, Any]], out: Path, round_index: int) -> Path:
     """Per-round summary: what was proposed, what held up, and how things failed."""
     by_diagnosis: dict[str, int] = {}
     by_origin: dict[str, int] = {}

@@ -48,9 +48,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from ava.engine import save_sample
-from ava.judge import ClipBlipJudge, load_image
-from ava.perceive import far_view
+from ava.image.engine import save_sample
+from ava.image.judge import ClipBlipJudge, load_image
+from ava.image.perceive import far_view
 from ava.report import load_scores
 from ava.spec import CandidateSpec
 
@@ -149,7 +149,7 @@ def check_generation(
     movement this environment generates on its own, and no smaller difference
     after an upgrade can be attributed to the upgrade.
     """
-    from ava.engine import Engine
+    from ava.image.engine import Engine
 
     engine = Engine(device=device)
     results: list[dict[str, Any]] = []

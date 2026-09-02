@@ -18,8 +18,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from .perceive import far_view, far_view_resize, near_view
-from .spec import CandidateSpec, Verdict
+from ava.image.perceive import far_view, far_view_resize, near_view
+from ava.metric import scores_to_probs
+from ava.spec import CandidateSpec, Verdict
 
 CLIP_ID = "openai/clip-vit-large-patch14"
 BLIP_ID = "Salesforce/blip-image-captioning-large"
@@ -29,29 +30,6 @@ def load_image(path: str | Path) -> torch.Tensor:
     """Read a PNG as (C, H, W) float in [0, 1]."""
     arr = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
     return torch.from_numpy(arr).permute(2, 0, 1)
-
-
-def scores_to_probs(
-    s: torch.Tensor, logit_scale: float
-) -> tuple[float, float, float]:
-    """Turn a CLIP score matrix into (p_far, p_near, J).
-
-    `s` is S[view][prompt], both axes ordered (low, high). Each row is a
-    two-way choice, so chance level is 0.5. The softmax temperature is CLIP's
-    own logit_scale.
-
-    J is the minimum, not the sum. A sum would reward a candidate that renders
-    the low-frequency side perfectly and the high-frequency side not at all;
-    an illusion only exists when both sides hold.
-
-    Kept separate from the model so it can be tested without loading CLIP.
-    """
-    if s.shape[-2:] != (2, 2):
-        raise ValueError(f"expected a (2, 2) score matrix, got {tuple(s.shape)}")
-    p = (logit_scale * s.float()).softmax(dim=-1)
-    p_far = float(p[0, 0])  # far view picks prompt_low
-    p_near = float(p[1, 1])  # near view picks prompt_high
-    return p_far, p_near, min(p_far, p_near)
 
 
 def to_pil(img: torch.Tensor) -> Image.Image:

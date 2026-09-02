@@ -35,8 +35,8 @@ from typing import Protocol
 
 import numpy as np
 
-from .spec import CandidateSpec, RunState, Verdict
-from .vocab import (
+from ava.spec import CandidateSpec, RunState, Verdict
+from ava.vocab import (
     ROLES,
     Arm,
     Role,
@@ -219,9 +219,7 @@ class BanditProposer:
     def _draw(self, role: Role, exclude: frozenset[str] = frozenset()) -> Arm:
         return thompson_sample(self.conn, role, self.rng, exclude=exclude)
 
-    def _accept(
-        self, spec: CandidateSpec, seen: set[str], state: RunState
-    ) -> bool:
+    def _accept(self, spec: CandidateSpec, seen: set[str], state: RunState) -> bool:
         uid = spec.uid()
         if uid in seen or uid in state.evaluated_uids:
             return False
@@ -270,12 +268,14 @@ class BanditProposer:
 
         if role == "low":
             spec = self._build(
-                arm.word, self._draw("high", exclude=frozenset({arm.word})).word,
+                arm.word,
+                self._draw("high", exclude=frozenset({arm.word})).word,
                 self._draw("style").word,
             )
         elif role == "high":
             spec = self._build(
-                self._draw("low", exclude=frozenset({arm.word})).word, arm.word,
+                self._draw("low", exclude=frozenset({arm.word})).word,
+                arm.word,
                 self._draw("style").word,
             )
         else:
@@ -337,7 +337,8 @@ class BanditProposer:
                     break
 
         repairable = [
-            (s, v) for s, v in state.last_round
+            (s, v)
+            for s, v in state.last_round
             if diagnose(v) in ("low_loses", "high_absent", "views_collapsed")
         ]
         for spec_prev, verdict in repairable[:n_swap]:
