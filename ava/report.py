@@ -114,15 +114,25 @@ def build_contact_sheet(
             )
         ranked = shown
 
-    max_views = max(len(r["view_paths"]) for r in ranked)
-    caption_lines = max(len(r["slots"]) for r in ranked) + 3  # task, score, style
-    caption = LINE * caption_lines + 6
-    n_rows = (len(ranked) + columns - 1) // columns
+    # Each grid row is as tall as its tallest cell (a four-view candidate
+    # stacks four images), so a sheet mixing tasks does not pad every cell to
+    # the largest task.
+    grid_rows = [ranked[i : i + columns] for i in range(0, len(ranked), columns)]
+    row_heights = []
+    for group in grid_rows:
+        views = max(len(r["view_paths"]) for r in group)
+        lines = max(len(r["slots"]) for r in group) + 3  # task, score, style
+        row_heights.append(cell * views + LINE * lines + 6)
+    row_tops = [0] * len(grid_rows)
+    for i in range(1, len(grid_rows)):
+        row_tops[i] = row_tops[i - 1] + row_heights[i - 1] + PAD
     banner = HEADER if hidden else 0
-    cell_h = cell * max_views + caption
     sheet = Image.new(
         "RGB",
-        (columns * (cell + PAD) + PAD, banner + n_rows * (cell_h + PAD) + PAD),
+        (
+            columns * (cell + PAD) + PAD,
+            banner + row_tops[-1] + row_heights[-1] + 2 * PAD,
+        ),
         BG,
     )
     draw = ImageDraw.Draw(sheet)
@@ -140,13 +150,13 @@ def build_contact_sheet(
 
     for i, row in enumerate(ranked):
         x = PAD + (i % columns) * (cell + PAD)
-        y = banner + PAD + (i // columns) * (cell_h + PAD)
+        y = banner + PAD + row_tops[i // columns]
 
         for v, path in enumerate(row["view_paths"]):
             image = Image.open(str(path)).convert("RGB").resize((cell, cell))
             sheet.paste(image, (x, y + v * cell))
 
-        text_y = y + max_views * cell + 3
+        text_y = y + len(row["view_paths"]) * cell + 3
         draw.text(
             (x, text_y),
             f"sep={rank_score(row):+.3f}  J={float(row['j']):.3f}",
