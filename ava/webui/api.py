@@ -6,6 +6,8 @@
   GET /api/runs/<run>/candidates       every scored candidate, media resolved
   GET /api/runs/<run>/lineage          pairs and parent -> child edges (evolve)
   GET /api/runs/<run>/grid             the MAP-Elites archive per task (evolve)
+  POST /api/runs/<run>/animate/<uid>   queue the candidate's transition clips
+  GET /api/runs/<run>/jobs             the clip queue for this run
 
 A run name is a single path component; anything else is a 404, never a path.
 """
@@ -66,3 +68,20 @@ def lineage(name: str) -> Response:
 @api.get("/runs/<name>/grid")
 def grid(name: str) -> Response:
     return jsonify(data.archive_grid(run_root(name)))
+
+
+@api.post("/runs/<name>/animate/<uid>")
+def animate(name: str, uid: str) -> tuple[Response, int]:
+    """202 with the queue state; 404 for an unknown uid; 409 if already queued."""
+    root = run_root(name)
+    if data.find_row(root, uid) is None:
+        abort(404)
+    queue = current_app.extensions["animations"]
+    if not queue.submit(root, uid):
+        abort(409)
+    return jsonify(queue.status(root)), 202
+
+
+@api.get("/runs/<name>/jobs")
+def jobs(name: str) -> Response:
+    return jsonify(current_app.extensions["animations"].status(run_root(name)))

@@ -25,6 +25,8 @@ const S = {
   lineageFilters: { task: "", onlyLineages: false },
   compare: null, // pair id of the child being compared with its parents
   selected: null, // {kind: "cand"|"pair", id}
+  clips: true, // show transition clips where they exist
+  jobs: null, // the clip queue for the current run
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,12 @@ const candById = () => new Map(S.cands.map((c) => [c.uid, c]));
 const nodeById = () => new Map(S.lineage.nodes.map((n) => [n.id, n]));
 
 function mediaHTML(c, cls = "media") {
+  if (S.clips && c.animations && c.animations.length) {
+    const clips = c.animations.map((a) =>
+      `<figure><video src="${fileUrl(a.path)}" autoplay loop muted playsinline preload="metadata"></video><figcaption>→ ${esc(a.slot)}</figcaption></figure>`
+    );
+    return `<div class="${cls}">${clips.join("")}</div>`;
+  }
   const items = c.media.map((m) =>
     m.kind === "audio"
       ? `<figure><audio controls preload="none" src="${fileUrl(m.path)}"></audio><figcaption>${esc(m.slot)}</figcaption></figure>`
@@ -100,6 +108,7 @@ async function loadRun() {
     S.grid = { k: 0, clusters: { words: {} }, tasks: [] };
   }
   S.version = summary.version;
+  S.jobs = await getJSON(base + "/jobs").catch(() => null);
 }
 
 async function poll() {
@@ -116,6 +125,46 @@ async function poll() {
     $("#poll").textContent = `polled ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     $("#poll").textContent = `poll failed: ${e.message}`;
+  }
+}
+
+function jobStateOf(uid) {
+  const j = S.jobs;
+  if (!j) return null;
+  if (j.running === uid) return "rendering…";
+  if (j.pending.includes(uid)) return `queued (${j.pending.indexOf(uid) + 1})`;
+  if (j.failed[uid]) return `failed: ${j.failed[uid]}`;
+  return null;
+}
+
+function renderJobs() {
+  const j = S.jobs, el = $("#jobs");
+  if (!j || (!j.running && !j.pending.length && !Object.keys(j.failed).length)) { el.textContent = ""; return; }
+  const parts = [];
+  if (j.running) parts.push("1 rendering");
+  if (j.pending.length) parts.push(`${j.pending.length} queued`);
+  if (Object.keys(j.failed).length) parts.push(`${Object.keys(j.failed).length} failed`);
+  el.textContent = `clips: ${parts.join(", ")}`;
+}
+
+let jobsWereBusy = false;
+async function pollJobs() {
+  if (!S.run) return;
+  try {
+    S.jobs = await getJSON(`/api/runs/${encodeURIComponent(S.run)}/jobs`);
+  } catch (e) { return; }
+  renderJobs();
+  const busy = Boolean(S.jobs.running || S.jobs.pending.length);
+  if (jobsWereBusy && !busy) await poll(); // clips landed: pick up the new files now
+  jobsWereBusy = busy;
+}
+
+async function requestClip(uid) {
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(S.run)}/animate/${encodeURIComponent(uid)}`, { method: "POST" });
+    if (!r.ok && r.status !== 409) throw new Error(`${r.status}`);
+  } catch (e) {
+    $("#jobs").textContent = `clip request failed: ${e.message}`;
   }
 }
 
@@ -141,6 +190,8 @@ function renderStatus() {
   else if (s.in_progress) txt = `<span class="live">live</span> · round ${s.in_progress.index}: ${s.in_progress.scored}/${s.in_progress.planned} scored`;
   else txt = `<span class="live">waiting</span> · ${s.rounds_done}/${s.rounds_planned} rounds`;
   $("#run-status").innerHTML = txt;
+  $("#clips-toggle").hidden = s.track !== "image";
+  renderJobs();
 }
 
 function renderTabs() {
@@ -315,10 +366,17 @@ function renderCandidates(main) {
       <label>round <select data-f="round">${options(uniq("round"), f.round)}</select></label>
       <label>search <input data-f="q" value="${esc(f.q)}" placeholder="prompt or style"></label>
       <label>sort <select data-f="sort">${["sep", "j", "round", "uid"].map((k) => `<option value="${k}" ${f.sort === k ? "selected" : ""}>${k === "sep" ? "sep_min" : k}</option>`).join("")}</select></label>
+      ${S.summary.track === "image" ? `<button class="action" id="animate-held" title="queue a transition clip for every held candidate that has none">render clips for held</button>` : ""}
       <span class="muted">${rows.length} / ${S.cands.length}</span>
     </div>
     <div class="grid">${rows.map(candCard).join("") || `<div class="empty">nothing matches</div>`}</div>`;
   main.querySelectorAll("[data-f]").forEach((el) => el.addEventListener(el.tagName === "INPUT" ? "input" : "change", () => { S.filters[el.dataset.f] = el.value; renderCandidates(main); }));
+  const heldBtn = $("#animate-held", main);
+  if (heldBtn) heldBtn.addEventListener("click", async () => {
+    heldBtn.disabled = true;
+    for (const c of S.cands) if (c.ok && !c.animations.length) await requestClip(c.uid);
+    await pollJobs();
+  });
   bindCards(main);
 }
 
@@ -480,6 +538,14 @@ function matrixHTML(c) {
   return `<table class="matrix">${head}${body}</table>`;
 }
 
+function clipControls(c) {
+  if (S.summary.track !== "image") return "";
+  if (c.animations.length) return `<div class="muted" style="font-size:12px;margin-top:4px">clips: ${c.animations.map((a) => `→ ${esc(a.slot)}`).join(", ")} · <span class="linkish" data-toggle-clips>${S.clips ? "show stills" : "show clips"}</span></div>`;
+  const job = jobStateOf(c.uid);
+  if (job) return `<div class="muted" style="font-size:12px;margin-top:4px">clip ${esc(job)}</div>`;
+  return `<div style="margin-top:6px"><button class="action" data-animate="${esc(c.uid)}">render transition clip</button></div>`;
+}
+
 function candDetail(c) {
   const byNode = nodeById();
   const parents = c.parents.map((id) => `<span class="linkish" data-pair="${esc(id)}">${esc(byNode.get(id)?.prompts.join(" / ") ?? id)}</span>`).join(", ");
@@ -489,6 +555,7 @@ function candDetail(c) {
   return `
     <h2>${esc(c.task)} <span class="mono muted">${esc(c.uid)}</span></h2>
     ${mediaHTML(c, "detail-media")}
+    ${clipControls(c)}
     ${c.sample ? `<div class="muted" style="font-size:12px;margin-top:4px"><a href="${fileUrl(c.sample)}" target="_blank">sample image</a> · <a href="${fileUrl(`round_${String(c.round).padStart(3, "0")}/${c.uid}/prompt.txt`)}" target="_blank">prompt card</a></div>` : ""}
     <div style="margin-top:8px">${promptsHTML(c)}</div>
     <div class="meta" style="margin-top:6px">
@@ -537,6 +604,8 @@ function renderDetail() {
   panel.querySelectorAll("[data-pair]").forEach((el) => el.addEventListener("click", () => { if (S.tab !== "lineage" && S.tab !== "archive" && S.tab !== "compare") S.tab = "lineage"; S.selected = { kind: "pair", id: el.dataset.pair }; render(); }));
   panel.querySelectorAll("[data-cand]").forEach((el) => el.addEventListener("click", () => { S.selected = { kind: "cand", id: el.dataset.cand }; render(); }));
   panel.querySelectorAll("[data-compare]").forEach((el) => el.addEventListener("click", () => { S.compare = el.dataset.compare; S.tab = "compare"; S.selected = null; render(); }));
+  panel.querySelectorAll("[data-animate]").forEach((el) => el.addEventListener("click", async () => { el.disabled = true; await requestClip(el.dataset.animate); await pollJobs(); render(); }));
+  panel.querySelectorAll("[data-toggle-clips]").forEach((el) => el.addEventListener("click", () => { S.clips = !S.clips; $("#clips-toggle input").checked = S.clips; render(); }));
 }
 
 // ---------------------------------------------------------------------------
@@ -558,10 +627,12 @@ async function boot() {
   await loadRun();
   render();
   setInterval(async () => { await poll(); }, POLL_MS);
+  setInterval(pollJobs, 2000);
+  $("#clips-toggle input").addEventListener("change", (e) => { S.clips = e.target.checked; render(); });
   setInterval(loadRuns, POLL_MS * 6);
 }
 
 boot().catch((e) => { $("#main").innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
 
 // For a console or a driver: the state and the entry points, nothing else.
-window.ava = { S, render, select, switchRun, poll };
+window.ava = { S, render, select, switchRun, poll, pollJobs, requestClip };

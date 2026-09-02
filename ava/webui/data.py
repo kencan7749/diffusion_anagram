@@ -32,6 +32,9 @@ STATE_FILENAME = "search_state.json"
 CLUSTERS_FILENAME = "clusters.npz"
 ROUND_GLOB = "round_*"
 WORDS_PER_CLUSTER = 4
+# Transition clips written by ava.image.animate (kept in step by a test there).
+ANIMATION_PREFIX = "anim_"
+ANIMATION_SUFFIX = ".mp4"
 
 # Files whose modification time tells a polling client that a run has moved on.
 _VERSION_FILES = ("state.json", ARCHIVE_FILENAME, STATE_FILENAME)
@@ -104,6 +107,9 @@ def run_version(root: Path) -> float:
             p = rd / name
             if p.exists():
                 stamps.append(p.stat().st_mtime)
+    # A clip rendered on demand is a new file the page should notice too.
+    for p in root.glob(f"{ROUND_GLOB}/*/{ANIMATION_PREFIX}*{ANIMATION_SUFFIX}"):
+        stamps.append(p.stat().st_mtime)
     return max(stamps)
 
 
@@ -145,6 +151,18 @@ def _media(row: dict[str, Any], round_dir: str) -> list[dict[str, str]]:
     return media
 
 
+def _animations(root: Path | None, round_dir: str, uid: str) -> list[dict[str, str]]:
+    """Transition clips present beside the stills, one per animated slot."""
+    if root is None:
+        return []
+    cdir = root / round_dir / uid
+    out = []
+    for p in sorted(cdir.glob(f"{ANIMATION_PREFIX}*{ANIMATION_SUFFIX}")):
+        slot = p.name[len(ANIMATION_PREFIX) : -len(ANIMATION_SUFFIX)]
+        out.append({"slot": slot, "path": f"{round_dir}/{uid}/{p.name}"})
+    return out
+
+
 def _sample_path(row: dict[str, Any], round_dir: str) -> str | None:
     p = row.get("image_path")
     if not p:
@@ -162,8 +180,13 @@ def _parent_id(key: Any) -> str:
     return str(key)
 
 
-def candidate_view(row: dict[str, Any], round_dir: str) -> dict[str, Any]:
-    """A scores.jsonl row with media resolved and the noise dropped."""
+def candidate_view(
+    row: dict[str, Any], round_dir: str, root: Path | None = None
+) -> dict[str, Any]:
+    """A scores.jsonl row with media resolved and the noise dropped.
+
+    With `root`, the clips already rendered for the candidate are listed too.
+    """
     extra = row.get("extra") or {}
     out = {
         "uid": row["uid"],
@@ -191,6 +214,7 @@ def candidate_view(row: dict[str, Any], round_dir: str) -> dict[str, Any]:
         "captions": list(row.get("captions", [])),
         "media": _media(row, round_dir),
         "sample": _sample_path(row, round_dir),
+        "animations": _animations(root, round_dir, str(row["uid"])),
         "pair": pair_id(row["task"], row.get("prompts", []), row.get("style", "")),
     }
     if "seconds" in row:
@@ -203,8 +227,17 @@ def candidates(root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for rd in round_dirs(root):
         for row in read_jsonl(rd / "scores.jsonl"):
-            out.append(candidate_view(row, rd.name))
+            out.append(candidate_view(row, rd.name, root))
     return out
+
+
+def find_row(root: Path, uid: str) -> dict[str, Any] | None:
+    """The raw scores.jsonl row of one candidate, or None."""
+    for rd in round_dirs(root):
+        for row in read_jsonl(rd / "scores.jsonl"):
+            if row.get("uid") == uid:
+                return row
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +480,7 @@ def run_summary(root: Path) -> dict[str, Any]:
         "in_progress": in_progress,
         "n_candidates": len(rows),
         "n_held": sum(1 for r in rows if r.get("diagnosis") == "ok"),
-        "best": candidate_view(best, f"round_{int(best['round']):03d}")
+        "best": candidate_view(best, f"round_{int(best['round']):03d}", root)
         if best
         else None,
         "has_archive": (root / ARCHIVE_FILENAME).exists(),

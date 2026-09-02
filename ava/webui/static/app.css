@@ -79,6 +79,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .card .media img { width: 100%; height: auto; display: block; background: #eee; }
 .card .media figcaption { font-size: 11px; color: var(--muted); text-align: center; }
 .card .media audio { width: 100%; }
+.card .media video, .detail-media video { width: 100%; height: auto; display: block; background: #eee; }
+#clips-toggle { color: var(--muted); font-size: 12px; margin-left: 8px; }
+#jobs { color: var(--muted); font-size: 12px; }
+button.action { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--accent); color: var(--accent); background: var(--card); border-radius: 4px; cursor: pointer; }
+button.action:hover { background: var(--bg); }
 .card .prompts { margin-top: 6px; font-size: 13px; }
 .card .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; font-size: 12px; color: var(--muted); }
 .card .score { font-weight: 600; color: var(--fg); }

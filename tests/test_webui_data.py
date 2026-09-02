@@ -204,3 +204,31 @@ def test_candidate_parents_are_pair_ids(evolve_root: Path) -> None:
     assert children, "the fake run produced no evolved child"
     for c in children:
         assert set(c["parents"]) <= ids
+
+
+def test_animations_are_listed_when_present(tmp_path: Path) -> None:
+    root = tmp_path / "manual"
+    _write_manual_run(root, audio=False, partial=False)
+    assert data.candidates(root)[0]["animations"] == []
+    before = data.run_version(root)
+    clip = root / "round_000" / "u1" / "anim_flip.mp4"
+    clip.write_bytes(b"\x00")
+    import os
+
+    os.utime(clip, (before + 10, before + 10))
+    row = data.candidates(root)[0]
+    assert row["animations"] == [{"slot": "flip", "path": "round_000/u1/anim_flip.mp4"}]
+    assert data.run_summary(root)["best"]["animations"] == row["animations"]
+    assert data.run_version(root) > before
+    found = data.find_row(root, "u1")
+    assert found is not None and found["uid"] == "u1"
+    assert data.find_row(root, "nope") is None
+
+
+def test_animation_naming_matches_the_renderer() -> None:
+    from ava.image import animate
+
+    assert (data.ANIMATION_PREFIX, data.ANIMATION_SUFFIX) == (
+        animate.ANIMATION_PREFIX,
+        animate.ANIMATION_SUFFIX,
+    )

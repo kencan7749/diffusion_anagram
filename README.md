@@ -176,6 +176,7 @@ ava/          the pipeline
     perceive.py   blur / grayscale / motion blur / VA transform of a picture
     engine.py     resident DeepFloyd generator, both papers' samplers
     judge.py      CLIP scoring, BLIP captions as evidence only
+    animate.py    transition clips via the upstream animate.py
     paper_examples.py  prompts quoted from the papers, with figure citations
   audio/        the time-reversal anagram track (tasks, vocab, loop: the audio flip
                 search; engine, judge, perceive: Stable Audio, CLAP, the views)
@@ -230,9 +231,27 @@ Tabs, modelled on ShinkaEvolve's WebUI:
 | Archive | the MAP-Elites grid per task, cluster × cluster, with the elite of each cell | `archive.jsonl`, `clusters.npz` |
 | Compare | a child beside its parents, changed slots highlighted, with the improvement | `archive.jsonl` |
 
+**Transition clips.** The upstream `animate.py` turns a candidate into the
+clip the papers show: the plain view with its prompt, an eased transition
+into the other view, that prompt, and back. One clip per non-plain view is
+written beside the stills as `anim_<slot>.mp4` (`ava/image/animate.py`), from
+the persisted `sample_256.png` and the run's rebuilt view objects — nothing
+is regenerated. Pre-render a run:
+
+```bash
+.venv/bin/python -m scripts.animate_run --run runs/flip_evo_20260902 --held-only
+```
+
+or click *render transition clip* on a candidate in the viewer (or *render
+clips for held* above the candidate grid); a worker thread renders one clip at
+a time, about 2.5 s each, and the page picks them up. The *clips* toggle
+switches between clips and stills. The triple hybrid has no `make_frame`
+upstream and stays as stills.
+
 The code is `ava/webui/` (Flask application factory, `data.py` for the
-reading, one JSON endpoint per function, a single page with no JavaScript
-dependencies). `flask --app ava.webui run` serves the same app.
+reading, one JSON endpoint per function, `jobs.py` for the clip queue, a
+single page with no JavaScript dependencies). `flask --app ava.webui run`
+serves the same app.
 
 ## Verification
 
