@@ -122,10 +122,11 @@ byte (`archive.jsonl` included), and resumes from its persisted state.
 scripts/run_ab_search.sh        # v1 vs v2 at equal budget -> results/stepB/ab.md
 ```
 
-Whether v2 replaces v1 as the default is decided by measurement, not by the
-design: `scripts/ab_compare.py` applies the rule from
-`.claude/tasks/design_search_v2.md` (yield at least v1's, more cells held) to
-the two runs' files. See `results/stepB/` for the current numbers.
+v1 stays the default. Whether v2 should replace it is a question for
+measurement, not for the design: `scripts/ab_compare.py` applies the rule
+from the design note (yield at least v1's, more cells held) to two runs'
+files, and a v2 run's own `archive.jsonl` and `search_state.json` (coverage,
+surrogate skill per round, operator rewards) say how it is doing in use.
 
 ## Layout
 
