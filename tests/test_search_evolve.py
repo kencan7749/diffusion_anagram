@@ -190,6 +190,22 @@ def test_pairs_that_held_get_a_second_seed(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_racing_leaves_at_least_one_new_candidate_per_round(tmp_path: Path) -> None:
+    """k=1 with a 90% race share must still propose something new each round."""
+    conn = connect(tmp_path / "vocab.db")
+    seed_author_vocab(conn)
+    proposer = make_proposer(conn, None, racing=RacingConfig(fraction=0.9))
+    config = LoopConfig(
+        run_id="k1", tasks=TASKS, rounds=4, k=1, harvest_seeds=0, proposer="evolve"
+    )
+    paths = RunPaths(tmp_path / "k1")
+    run_loop(config, paths, conn, proposer, FakeGenerator(), StructuredJudge())
+    rows = rows_of(paths)
+    assert len(rows) == 4
+    assert all(r["origin"] != RACE for r in rows)
+    conn.close()
+
+
 def test_racing_can_be_switched_off(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
     seed_author_vocab(conn)

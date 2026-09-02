@@ -344,7 +344,9 @@ class EvolutionaryProposer:
         seen = set(state.evaluated_uids)
         out: list[Proposal] = []
 
-        n_race = int(round(k * self.cfg.racing.fraction))
+        # Racing never takes the whole round: at least one slot is always a
+        # new candidate, or a round could consist of nothing at all.
+        n_race = min(int(round(k * self.cfg.racing.fraction)), k - 1)
         for p in race_proposals(self.archive, self.cfg.racing, n_race, seen):
             uid = p.spec.uid()
             seen.add(uid)
