@@ -140,68 +140,42 @@ _BLOCKED = frozenset(
 # List formats: what the model is asked to continue, and what counts as an item
 # ---------------------------------------------------------------------------
 
-# Cues that a sound description says how it starts or ends. A generated line
-# without one is a sound, not an *envelope*, and the reversal anagram is built
-# on envelopes (Step 0a: CLAP hears the envelope flip, not the pitch).
-_ENVELOPE_CUES = frozenset(
-    "then fading fades rising rises swell swelling swells building builds decay "
-    "decays decaying stop stops stopping silence cut dying ringing growing "
-    "louder quieter away echo echoing trailing tail burst crescendo".split()
+# Weapons and violence are refused at the source for sounds as for subjects;
+# the first sentence-style run produced "people being shot" unprompted.
+_SOUND_BLOCKED = frozenset(
+    "gun guns gunshot gunshots shot shots rifle pistol bomb bombs bombing "
+    "grenade stabbing scream screams screaming".split()
 )
-_SOUND_VALID = re.compile(r"^[a-z][a-z0-9 ,'\-]{14,89}$")
-# The first dry run produced "people being shot" and "a couple hitting each
-# other" among ordinary sounds. Weapons and violence against people are
-# refused at the source, as the subject list does; a gunshot is a real
-# percussive sound, but nothing here needs it.
-_SOUND_BLOCKED = _BLOCKED | frozenset(
-    "gun guns gunshot gunshots shot shots shooting rifle pistol bomb bombs "
-    "bombing grenade stabbing screaming scream screams".split()
-)
-_SOUND_BLOCKED_PHRASES = ("people being", "hitting each other", "each other")
 
-
-# Exemplars are sentences from ava/audio/vocab.py (the Step 1 pairs and a few
-# of the authored decays and swells), so the conditioning introduces nothing
-# the audio track has not already committed to. Twelve rather than six: with
-# fewer, successive draws riffed on one example ("... out of a balloon").
+# Exemplars are the short sound sources in ava/audio/vocab.py, so the
+# conditioning introduces nothing the audio track has not already committed to.
 SOUND_EXEMPLARS: tuple[str, ...] = (
-    "a match being struck, sharp attack then a slow decay",
-    "a balloon being inflated, building up to a stop",
-    "a large bell struck once, ringing and slowly fading",
-    "wind building from a whisper to a gust, then sudden silence",
-    "a hammer hitting an anvil once, ringing out",
-    "a fire dying down into silence, then stopping",
-    "a door slamming shut, the echo dying away",
-    "a train approaching, getting louder, then a sudden cut",
-    "air rushing out of a balloon, fading away",
-    "a metallic sound swelling out of silence to a sudden stop",
-    "a stone dropped into water, the splash settling",
-    "a kettle whistle rising to full pitch, then stopping at once",
+    "a church bell",
+    "a door slamming",
+    "a kettle whistle",
+    "a passing train",
+    "a hammer on an anvil",
+    "a balloon popping",
+    "a gust of wind",
+    "a cymbal crash",
+    "a car engine",
+    "a glass breaking",
+    "a crowd cheering",
+    "a dripping tap",
 )
 
 
 def extract_sound(item: str) -> str | None:
-    """Validate one list item as an envelope description, or return None.
+    """Validate one list item as a sound source: `extract_phrase` plus a blocklist.
 
-    Looser than `extract_phrase` -- commas are part of the sentence here, not
-    the list separator -- and stricter in one way: the line must say how the
-    sound starts or ends, or it is useless to the time-reversal task.
+    The same short-noun-phrase rule as the painting subjects. Envelope
+    sentences ("a bell struck once, ringing and slowly fading") were tried
+    first and GPT-2 mostly riffed on the examples; a plain source ("a church
+    bell") is what a list continuation produces reliably, and whether it
+    works in either direction is for the judge to measure.
     """
-    phrase = " ".join(item.lower().strip().lstrip("-*• ").strip("\"'“”.:;!?").split())
-    if not _SOUND_VALID.match(phrase):
-        return None
-    words = re.findall(r"[a-z']+", phrase)
-    if len(words) < 3 or len(words) > 14:  # too short to be a sound, or prose
-        return None
-    if words[0] in _FUNCTION_FIRST or words[0] == "the":
-        return None
-    if any(w in _SOUND_BLOCKED for w in words):
-        return None
-    if any(bad in phrase for bad in _SOUND_BLOCKED_PHRASES):
-        return None
-    if any(ex in phrase for ex in SOUND_EXEMPLARS):  # riffing on the example
-        return None
-    if not any(w in _ENVELOPE_CUES for w in words):
+    phrase = extract_phrase(item)
+    if phrase is None or any(w in _SOUND_BLOCKED for w in phrase.split()):
         return None
     return phrase
 
@@ -376,18 +350,10 @@ SUBJECT_FORMAT = ListFormat(
 
 SOUND_FORMAT = ListFormat(
     name="sound",
-    # The header names ordinary sources; without it the model drifts to
-    # explosions and fireballs within a few draws (observed on the first run).
-    prompt=(
-        "Everyday sounds (doors, bells, water, wind, engines, voices, tools), "
-        "each described by how it starts and how it ends:\n- {examples}\n-"
-    ),
+    prompt="Sounds to record: {examples},",
     exemplars=SOUND_EXEMPLARS,
     validate=extract_sound,
-    examples_per_prompt=3,
-    joiner="\n- ",
-    separator="\n",
-    max_new_tokens=96,
+    examples_per_prompt=EXAMPLES_PER_PROMPT,
 )
 
 # Which format a task's vocabulary is written in. Anything not listed is a
@@ -638,8 +604,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--format",
         choices=("subject", "sound"),
         default="subject",
-        help="subject: painting subjects (comma list); sound: envelope sentences "
-        "for the time-reversal task (bulleted list)",
+        help="subject: painting subjects; sound: sound sources for the "
+        "time-reversal task. Both are comma lists of short noun phrases",
     )
     p.add_argument("--round", type=int, default=0)
     p.add_argument(

@@ -311,66 +311,44 @@ def test_provenance_appends_rather_than_overwrites(tmp_path: Path) -> None:
     assert len(log.read_text().strip().splitlines()) == 2
 
 
-# -- the sound format (envelope sentences for the time-reversal task) ------
+# -- the sound format (sound sources for the time-reversal task) --------------
 
 
-def test_sound_format_reads_a_bulleted_list_and_stops_where_it_ends() -> None:
+def test_sound_format_is_a_comma_list_of_short_sources() -> None:
     from ava_vocab.generate_vocab import SOUND_FORMAT
 
-    continuation = (
-        " a bell struck once, ringing and slowly fading\n"
-        "- a car horn blast fading into the distance\n"
-        "- something with no cue at all\n"
-        "\n"
-        "The next paragraph is prose, then more prose"
-    )
-    assert SOUND_FORMAT.clean([continuation]) == [
-        "a bell struck once, ringing and slowly fading",
-        "a car horn blast fading into the distance",
+    text = "a church bell, a slamming door, and then the sound of, a kettle\nprose"
+    assert SOUND_FORMAT.clean([text]) == [
+        "a church bell",
+        "a slamming door",
+        "a kettle",
     ]
 
 
 @pytest.mark.parametrize(
     "line",
-    [
-        "a door slamming, then silence",
-        "wind rising to a howl then cut off",
-        "- a cork popping, the fizz fading away",
-    ],
+    ["a dog barking", "a passing train", "rain on a tin roof", "a corpse falling"],
 )
-def test_sound_format_accepts_envelope_sentences(line: str) -> None:
-    from ava_vocab.generate_vocab import extract_sound
+def test_sound_format_applies_the_subject_rule_and_its_blocklist(line: str) -> None:
+    from ava_vocab.generate_vocab import extract_phrase, extract_sound
 
-    assert extract_sound(line) == line.lstrip("- ")
+    assert extract_sound(line) == extract_phrase(line)
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        "a dog",  # too short, no cue
-        "a beautiful sunny afternoon in the park",  # no envelope cue
-        "and then it stops",  # fragment of prose
-        "The bell rings then fades",  # definite: refers back
-        "a corpse falling, then silence",  # blocked
-        "a few explosions, then the sound of people being shot",  # blocked
-        "a bolt being thrown, a hammer hitting an anvil once, ringing out",  # copy
-        "a long story about a bell that was struck once and then it rang out "
-        "for a very long time indeed",  # prose
-    ],
-)
-def test_sound_format_rejects_what_is_not_an_envelope(line: str) -> None:
+@pytest.mark.parametrize("line", ["a gunshot", "a bomb going off", "people screaming"])
+def test_sound_format_refuses_weapons_and_violence(line: str) -> None:
     from ava_vocab.generate_vocab import extract_sound
 
     assert extract_sound(line) is None
 
 
-def test_sound_prompt_rotates_step1_exemplars_and_ends_with_a_bullet() -> None:
-    from ava.audio.vocab import DECAY_PROMPTS, STEP1_PROMPTS, SWELL_PROMPTS
+def test_sound_prompt_uses_committed_sources_and_rotates() -> None:
+    from ava.audio.vocab import SOURCE_PROMPTS
     from ava_vocab.generate_vocab import SOUND_EXEMPLARS, SOUND_FORMAT
 
-    assert set(SOUND_EXEMPLARS) <= set(STEP1_PROMPTS + DECAY_PROMPTS + SWELL_PROMPTS)
+    assert set(SOUND_EXEMPLARS) <= set(SOURCE_PROMPTS)
     prompt = SOUND_FORMAT.build_prompt(0)
-    assert prompt.endswith("\n-") and prompt == prompt.rstrip()
+    assert prompt.startswith("Sounds to record: ") and prompt == prompt.rstrip()
     assert SOUND_FORMAT.build_prompt(0) != SOUND_FORMAT.build_prompt(1)
 
 
@@ -392,7 +370,7 @@ def test_llm_supply_derives_a_new_seed_per_call(tmp_path: Path) -> None:
 
         def sample(self, sampling: SamplingConfig, fmt):
             self.seeds.append(sampling.seed)
-            return [f"a word {sampling.seed}, then silence"], []
+            return [f"a word {sampling.seed}"], []
 
     supply = LlmSupply.__new__(LlmSupply)
     supply.draws, supply.seed, supply.log_path = 1, 0, None

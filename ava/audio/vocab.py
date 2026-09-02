@@ -71,6 +71,25 @@ SWELL_PROMPTS: tuple[str, ...] = (
     "a rising drone that swells and ends in a sharp stop",
 )
 
+# Short sound sources, the form the in-run GPT-2 supply produces (the same
+# noun-phrase rule as the painting subjects). They carry no envelope in words;
+# a bell implies a decay and an approaching train a swell, and whether that is
+# enough for the judge is measured, not assumed. Also the supply's exemplars.
+SOURCE_PROMPTS: tuple[str, ...] = (
+    "a church bell",
+    "a door slamming",
+    "a kettle whistle",
+    "a passing train",
+    "a hammer on an anvil",
+    "a balloon popping",
+    "a gust of wind",
+    "a cymbal crash",
+    "a car engine",
+    "a glass breaking",
+    "a crowd cheering",
+    "a dripping tap",
+)
+
 # Stable Audio prompts read as descriptions, not captions with a medium, so the
 # only style is none. The arm exists so the loop's credit assignment and the
 # component table have somewhere to put J.
@@ -91,7 +110,7 @@ def seed_audio_vocab(conn: sqlite3.Connection) -> int:
             UNIFORM_PRIOR,
             citation=STEP1_CITATION,
         )
-    for word in DECAY_PROMPTS + SWELL_PROMPTS:
+    for word in DECAY_PROMPTS + SWELL_PROMPTS + SOURCE_PROMPTS:
         added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
     for style in STYLES:
         added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)

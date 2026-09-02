@@ -29,6 +29,7 @@ from ava.audio.spec import AudioCandidateSpec
 from ava.audio.tasks import TIME_REVERSE
 from ava.audio.vocab import (
     DECAY_PROMPTS,
+    SOURCE_PROMPTS,
     STEP1_PROMPTS,
     SWELL_PROMPTS,
     seed_audio_vocab,
@@ -139,7 +140,8 @@ def test_time_reverse_is_a_registered_symmetric_two_view_task() -> None:
 def test_audio_vocab_seeds_every_authored_prompt_once(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
     added = seed_audio_vocab(conn)
-    expected = len(STEP1_PROMPTS) + len(DECAY_PROMPTS) + len(SWELL_PROMPTS) + 1
+    authored = STEP1_PROMPTS + DECAY_PROMPTS + SWELL_PROMPTS + SOURCE_PROMPTS
+    expected = len(authored) + 1
     assert added == expected
     assert seed_audio_vocab(conn) == 0
     arms = list_arms(conn, "time_reverse", "subject")
