@@ -23,9 +23,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ava.audio.features import to_mono
 from ava.audio.perceive import forward_view, reverse_view
+from ava.audio.resample import resample
 
 CLAP_ID = "laion/clap-htsat-unfused"
+# CLAP refuses audio at any other rate, and it is mono.
+CLAP_SAMPLE_RATE = 48_000
 
 __all__ = ["CLAP_ID", "ClapJudge"]
 
@@ -42,8 +46,14 @@ class ClapJudge:
         self,
         device: str = "cuda",
         clap_id: str = CLAP_ID,
-        sample_rate: int = 48_000,
+        sample_rate: int = CLAP_SAMPLE_RATE,
     ) -> None:
+        """`sample_rate` is the rate of the audio that will be handed in.
+
+        Anything other than CLAP's own 48 kHz is converted here rather than
+        pushed back onto the caller: the generator's rate is the generator's
+        business, and 44.1 kHz is what Stable Audio produces.
+        """
         self.device = device
         self.clap_id = clap_id
         self.sample_rate = sample_rate
@@ -86,11 +96,19 @@ class ClapJudge:
 
     @torch.no_grad()
     def audio_emb(self, waves: list[np.ndarray]) -> torch.Tensor:
-        """Normalized audio embeddings (N, D)."""
+        """Normalized audio embeddings (N, D).
+
+        Each signal is downmixed and rate-converted first. CLAP is mono at
+        48 kHz and raises rather than adapting.
+        """
         self._ensure_clap()
+        prepared = [
+            resample(to_mono(w), self.sample_rate, CLAP_SAMPLE_RATE).astype(np.float32)
+            for w in waves
+        ]
         inputs = self._proc(
-            audios=[w.astype(np.float32) for w in waves],
-            sampling_rate=self.sample_rate,
+            audios=prepared,
+            sampling_rate=CLAP_SAMPLE_RATE,
             return_tensors="pt",
         ).to(self.device)
         emb = self._model.get_audio_features(**inputs)

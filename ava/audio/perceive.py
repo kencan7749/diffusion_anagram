@@ -21,11 +21,16 @@ def forward_view(wave: np.ndarray) -> np.ndarray:
 def reverse_view(wave: np.ndarray) -> np.ndarray:
     """The signal played backwards.
 
+    Indexes the last axis, not the first. Generators return (channels, n), and
+    `wave[::-1]` on one of those swaps left and right while leaving time alone
+    -- a wrong answer that raises nothing and, on a near-symmetric stereo
+    image, sounds almost right.
+
     Returns a contiguous copy rather than a reversed view, because the CLAP
     feature extractor is given raw buffers and negative strides are a source
     of silent breakage downstream.
     """
-    return np.ascontiguousarray(wave[::-1])
+    return np.ascontiguousarray(wave[..., ::-1])
 
 
 VIEWS = {"forward": forward_view, "reverse": reverse_view}

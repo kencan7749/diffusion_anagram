@@ -74,6 +74,7 @@ warn_redundant_casts = true
 # These ship without type information.
 [[tool.mypy.overrides]]
 module = [
+    "scipy.*",
     "visual_anagrams.*",
     "diffusers.*",
     "transformers.*",
