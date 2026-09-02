@@ -214,6 +214,7 @@ def record_row(
             "round": round_index,
             "origin": proposal.origin,
             "detail": proposal.detail,
+            "extra": dict(proposal.extra),
             "task": proposal.spec.task,
             "prompts": list(proposal.spec.prompts),
             "style": proposal.spec.style,
@@ -362,6 +363,10 @@ def run_round(
 
     state.last_round = completed
     state.round_index = index + 1
+    # The proposer sees the round before the state file does, so a proposer
+    # with its own persisted history is never ahead of or behind state.json by
+    # more than one round; re-folding a round it already saw must be harmless.
+    proposer.observe(state)
     paths.state.write_text(state.to_json(), encoding="utf-8")
     return rows
 

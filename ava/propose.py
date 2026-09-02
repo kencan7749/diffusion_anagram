@@ -31,8 +31,8 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
-from typing import Protocol
+from dataclasses import asdict, dataclass, field
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -86,18 +86,33 @@ class Proposal:
     spec: CandidateSpec
     origin: str
     detail: str
+    # Machine-readable provenance (the operator that made it, the surrogate's
+    # prediction, ...). Written to candidates.jsonl and scores.jsonl so a
+    # search's decisions can be audited against what actually happened.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "uid": self.spec.uid(),
             "origin": self.origin,
             "detail": self.detail,
+            "extra": dict(self.extra),
             "spec": asdict(self.spec),
         }
 
 
 class Proposer(Protocol):
     def propose(self, state: RunState, k: int) -> list[Proposal]: ...
+
+    def observe(self, state: RunState) -> None:
+        """Called once per round, after `state.last_round` holds its results.
+
+        The bandit proposers read `state.last_round` lazily inside `propose`
+        and need nothing here; a proposer that keeps its own history (the
+        evolutionary one keeps an archive) folds the round in at this point,
+        so its persisted state is complete after the final round too.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +194,7 @@ def repairable(diagnosis: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class _Builder:
+class CandidateBuilder:
     """What both proposers share: turning drawn words into a CandidateSpec."""
 
     def __init__(
@@ -272,7 +287,7 @@ class BanditProposer:
         # fixed means a difference between two candidates is a difference
         # between prompts, not between noise draws. Seed luck is dealt with at
         # harvest time, where the survivors are regenerated across many seeds.
-        self.builder = _Builder(
+        self.builder = CandidateBuilder(
             tasks,
             screening_seed,
             guidance_scale,
@@ -285,6 +300,9 @@ class BanditProposer:
     @property
     def tasks(self) -> list[IllusionTask]:
         return self.builder.tasks
+
+    def observe(self, state: RunState) -> None:
+        """Nothing to fold in: swaps read `state.last_round` at proposal time."""
 
     # -- helpers ---------------------------------------------------------
 
@@ -487,7 +505,7 @@ class UniformProposer:
     ) -> None:
         self.conn = conn
         self.rng = rng
-        self.builder = _Builder(
+        self.builder = CandidateBuilder(
             tasks,
             screening_seed,
             guidance_scale,
@@ -499,6 +517,9 @@ class UniformProposer:
         # merely equal sampling probability, which at n=40 is not the same thing.
         self.roles_to_balance = roles_to_balance
         self._cursor: dict[tuple[str, str], int] = {}
+
+    def observe(self, state: RunState) -> None:
+        """A uniform sweep learns nothing from results, by design."""
 
     def _pick(
         self, task: IllusionTask, role: str, exclude: frozenset[str] = frozenset()
