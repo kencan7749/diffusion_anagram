@@ -121,6 +121,7 @@ async function poll() {
 
 async function switchRun(name) {
   S.run = name;
+  $("#run-select").value = name;
   S.selected = null;
   S.compare = null;
   location.hash = `${name}/${S.tab}`;
@@ -197,7 +198,9 @@ function lineChart(series, opts = {}) {
   const x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 1);
   let y0 = opts.y0 ?? Math.min(...ys), y1 = opts.y1 ?? Math.max(...ys);
   if (y0 === y1) { y0 -= 0.5; y1 += 0.5; }
-  const pad = (y1 - y0) * 0.08; y0 -= pad; y1 += pad;
+  const pad = (y1 - y0) * 0.08;
+  if (opts.y0 === undefined) y0 -= pad;
+  if (opts.y1 === undefined) y1 += pad;
   const X = (x) => ml + ((x - x0) / (x1 - x0)) * (W - ml - mr);
   const Y = (y) => mt + (1 - (y - y0) / (y1 - y0)) * (H - mt - mb);
   const yfmt = opts.yfmt ?? ((v) => v.toFixed(2));
@@ -209,7 +212,6 @@ function lineChart(series, opts = {}) {
   }
   if (y0 < 0 && y1 > 0) out.push(`<line x1="${ml}" x2="${W - mr}" y1="${Y(0)}" y2="${Y(0)}" stroke="#999" stroke-dasharray="3 3"/>`);
   for (let x = x0; x <= x1; x++) out.push(`<text x="${X(x)}" y="${H - 8}" text-anchor="middle">${x}</text>`);
-  out.push(`<text x="${W - mr}" y="${H - 8}" text-anchor="end" style="font-size:10px">round</text>`);
   series.forEach((s, i) => {
     const color = s.color ?? PALETTE[i % PALETTE.length];
     const pts = s.values.filter((v) => v.y !== null && v.y !== undefined && !Number.isNaN(v.y));
@@ -481,7 +483,9 @@ function matrixHTML(c) {
 function candDetail(c) {
   const byNode = nodeById();
   const parents = c.parents.map((id) => `<span class="linkish" data-pair="${esc(id)}">${esc(byNode.get(id)?.prompts.join(" / ") ?? id)}</span>`).join(", ");
-  const sur = c.surrogate && Object.keys(c.surrogate).length ? `<div class="muted">surrogate: ${esc(JSON.stringify(c.surrogate))} · selection ${esc(c.selection)}</div>` : "";
+  const sur = c.surrogate && Object.keys(c.surrogate).length
+    ? `<div class="muted" style="font-size:12px">surrogate: ${Object.entries(c.surrogate).map(([k, v]) => `${esc(k)} ${typeof v === "number" ? v.toFixed(3) : esc(v)}`).join(" · ")} · selection ${esc(c.selection)}</div>`
+    : "";
   return `
     <h2>${esc(c.task)} <span class="mono muted">${esc(c.uid)}</span></h2>
     ${mediaHTML(c, "detail-media")}
@@ -558,3 +562,6 @@ async function boot() {
 }
 
 boot().catch((e) => { $("#main").innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+
+// For a console or a driver: the state and the entry points, nothing else.
+window.ava = { S, render, select, switchRun, poll };

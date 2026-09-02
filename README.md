@@ -167,6 +167,7 @@ ava/          the pipeline
   propose.py    what to try next (v1 bandit), and per-slot credit assignment
   report.py     contact sheet and component ranking
   loop.py       orchestration (CLI entry point)
+  webui/        the run viewer (Flask; reads persisted files only)
   search/       the v2 evolutionary proposer (archive, operators, novelty,
                 racing, surrogate, evolve); torch-free
   image/        the multi-view illusion track
@@ -179,7 +180,7 @@ ava/          the pipeline
   audio/        the time-reversal anagram track (tasks, vocab, loop: the audio flip
                 search; engine, judge, perceive: Stable Audio, CLAP, the views)
 ava_vocab/    vocabulary generation from GPT-2 (see its README)
-scripts/      one-off analyses
+scripts/      one-off analyses, and webui.py to watch runs in the browser
 tests/
 ```
 
@@ -204,6 +205,34 @@ Grow the vocabulary between runs:
 ```bash
 .venv/bin/python -m ava_vocab.generate_vocab --db runs/vocab.db --seed 1 --arm flip:subject --arm hybrid:low
 ```
+
+## Watching a run
+
+```bash
+.venv/bin/python -m scripts.webui --runs runs --port 8765
+```
+
+then open <http://127.0.0.1:8765/> (from a laptop: `ssh -L 8765:127.0.0.1:8765 host`).
+The viewer reads only what a run persisted — `config.yaml`, `state.json`,
+`round_*/scores.jsonl`, and for an evolve run `archive.jsonl`,
+`search_state.json` and `clusters.npz` — so it can be started beside a search
+that is still going; the page polls every five seconds and follows new rounds.
+Nothing is regenerated, re-judged or refitted, and no model is loaded.
+
+Tabs, modelled on ShinkaEvolve's WebUI:
+
+| tab | what it shows | from |
+|---|---|---|
+| Overview | the run's numbers, the best candidate, the config | `config.yaml`, `scores.jsonl` |
+| Rounds | best / mean `sep_min`, held rate, archive coverage, surrogate rho, operator reward, duplicate rejection, per round | `scores.jsonl`, `search_state.json` |
+| Candidates | every scored candidate with its views (or wavs), filterable and sortable; click for the N×N CLIP matrix and captions | `scores.jsonl`, `view_<slot>.png` |
+| Lineage | pairs as nodes, `parents → child` as edges labelled by operator; colour is fitness, a gold ring is an elite | `archive.jsonl` |
+| Archive | the MAP-Elites grid per task, cluster × cluster, with the elite of each cell | `archive.jsonl`, `clusters.npz` |
+| Compare | a child beside its parents, changed slots highlighted, with the improvement | `archive.jsonl` |
+
+The code is `ava/webui/` (Flask application factory, `data.py` for the
+reading, one JSON endpoint per function, a single page with no JavaScript
+dependencies). `flask --app ava.webui run` serves the same app.
 
 ## Verification
 
