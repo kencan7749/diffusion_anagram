@@ -16,6 +16,7 @@ dependencies = [
     "pillow==10.1.0",
     "safetensors==0.4.5",
     "sentencepiece==0.1.99",
+    "setuptools<81.0.0",
     "tokenizers==0.20.3",
     "torch==2.1.1",
     # Required by CosineDPMSolverMultistepScheduler, the scheduler Stable Audio
@@ -82,5 +83,7 @@ module = [
     "torchvision.*",
     "PIL.*",
     "yaml",
+    "imageio.*",
+    "imageio_ffmpeg",
 ]
 ignore_missing_imports = true
