@@ -152,6 +152,16 @@ def _sample_path(row: dict[str, Any], round_dir: str) -> str | None:
     return f"{round_dir}/{row['uid']}/{Path(str(p)).name}"
 
 
+def _parent_id(key: Any) -> str:
+    """A parent recorded as an archive key becomes the parent pair's id."""
+    if isinstance(key, str):
+        try:
+            return _pair_id_of_key(key)
+        except (ValueError, TypeError):
+            return key
+    return str(key)
+
+
 def candidate_view(row: dict[str, Any], round_dir: str) -> dict[str, Any]:
     """A scores.jsonl row with media resolved and the noise dropped."""
     extra = row.get("extra") or {}
@@ -165,7 +175,7 @@ def candidate_view(row: dict[str, Any], round_dir: str) -> dict[str, Any]:
         "seed": row.get("seed"),
         "origin": row.get("origin", ""),
         "operator": extra.get("operator"),
-        "parents": list(extra.get("parents") or []),
+        "parents": [_parent_id(k) for k in extra.get("parents") or []],
         "selection": extra.get("selection"),
         "surrogate": extra.get("surrogate") or {},
         "ok": bool(row.get("diagnosis") == "ok"),

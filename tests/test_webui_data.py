@@ -196,3 +196,11 @@ def test_list_runs_skips_directories_without_a_config(tmp_path: Path) -> None:
     names = [s["name"] for s in data.list_runs(tmp_path / "runs")]
     assert names == ["a"]
     assert data.list_runs(tmp_path / "nowhere") == []
+
+
+def test_candidate_parents_are_pair_ids(evolve_root: Path) -> None:
+    ids = {n["id"] for n in data.lineage(evolve_root)["nodes"]}
+    children = [c for c in data.candidates(evolve_root) if c["parents"]]
+    assert children, "the fake run produced no evolved child"
+    for c in children:
+        assert set(c["parents"]) <= ids
