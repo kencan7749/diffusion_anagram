@@ -1,4 +1,4 @@
-"""Properties of the illusion score J.
+"""Properties of the illusion score J, for two views and for N.
 
 The model-free tests pin down the arithmetic. The model-backed test (marked
 slow) is Step 0-1: the known-good example must score above chance on both views.
@@ -10,16 +10,17 @@ import pytest
 import torch
 
 from ava.image.perceive import blur_params, far_view, far_view_resize, near_view
-from ava.metric import scores_to_probs
-from ava.spec import KERNEL_SIZE, SIGMA, CandidateSpec, Verdict
+from ava.metric import alignment, concealment, multiway_probs, scores_to_probs
+from ava.spec import KERNEL_SIZE, SIGMA, CandidateSpec
 
 # CLIP ViT-L/14 ships logit_scale = ln(100), so exp() is 100.
 LOGIT_SCALE = 100.0
 
 SMOKE_IMAGE = Path("results/hybrid_smoke/0000/sample_256.png")
 SMOKE_SPEC = CandidateSpec(
-    prompt_low="a painting of a panda",
-    prompt_high="a painting of a flower arrangement",
+    task="hybrid",
+    prompts=("a panda", "a flower arrangement"),
+    style="a painting of",
 )
 
 
@@ -79,28 +80,97 @@ def test_j_never_exceeds_either_view() -> None:
     assert 0.0 <= j <= 1.0
 
 
-def test_rejects_wrong_shape() -> None:
+def test_two_view_helper_rejects_other_shapes() -> None:
     with pytest.raises(ValueError):
         scores_to_probs(torch.zeros(3, 3), LOGIT_SCALE)
 
 
-def test_verdict_diagnosis_covers_each_failure_mode() -> None:
-    def verdict(p_far: float, p_near: float) -> Verdict:
+# -- N views ------------------------------------------------------------------
+
+
+def test_multiway_agrees_with_the_two_view_form() -> None:
+    s = _matrix(0.35, 0.20, 0.24, 0.26)
+    p, j = multiway_probs(s, LOGIT_SCALE)
+    assert tuple(p) + (j,) == pytest.approx(scores_to_probs(s, LOGIT_SCALE))
+
+
+def test_multiway_chance_level_is_one_over_n() -> None:
+    p, j = multiway_probs(torch.full((3, 3), 0.3), LOGIT_SCALE)
+    assert p == pytest.approx([1 / 3] * 3)
+    assert j == pytest.approx(1 / 3)
+
+
+def test_multiway_j_is_the_weakest_view() -> None:
+    s = torch.tensor([[0.30, 0.20, 0.20], [0.20, 0.30, 0.20], [0.25, 0.26, 0.27]])
+    p, j = multiway_probs(s, LOGIT_SCALE)
+    assert j == p[2] == min(p)
+    # A 0.01 gap over the runner-up at logit_scale 100 is a factor of e, so the
+    # third view keeps only about two thirds of its row: 1 / (1 + e^-1 + e^-2).
+    assert p[2] == pytest.approx(0.665, abs=1e-3)
+    assert p[0] > 0.99 and p[1] > 0.99
+
+
+def test_multiway_rejects_non_square_and_degenerate_matrices() -> None:
+    with pytest.raises(ValueError):
+        multiway_probs(torch.zeros(2, 3), LOGIT_SCALE)
+    with pytest.raises(ValueError):
+        multiway_probs(torch.zeros(1, 1), LOGIT_SCALE)
+    with pytest.raises(ValueError):
+        multiway_probs(torch.zeros(4), LOGIT_SCALE)
+
+
+def test_j_and_sep_min_can_disagree_with_three_views() -> None:
+    """With N > 2 the two orderings are not the same one; the README says so.
+
+    Candidate A has the larger runner-up margin on its weakest view but a
+    strong third competitor, so its softmax mass is split three ways; B has a
+    smaller margin but no third competitor. sep_min prefers A, J prefers B.
+    """
+    from ava.spec import Verdict
+
+    def verdict(s: torch.Tensor) -> Verdict:
+        p, j = multiway_probs(s, LOGIT_SCALE)
         return Verdict(
             uid="x",
-            s_far_low=0.0,
-            s_far_high=0.0,
-            s_near_low=0.0,
-            s_near_high=0.0,
-            p_far=p_far,
-            p_near=p_near,
-            j=min(p_far, p_near),
+            task="three_view",
+            slots=["a", "b", "c"],
+            scores=s.tolist(),
+            p=p,
+            j=j,
+            alignment=alignment(s),
+            concealment=concealment(s, LOGIT_SCALE),
         )
 
-    assert verdict(0.8, 0.8).diagnose() == "ok"
-    assert verdict(0.2, 0.2).diagnose() == "pair_mismatch"
-    assert verdict(0.2, 0.8).diagnose() == "low_loses"
-    assert verdict(0.8, 0.2).diagnose() == "high_absent"
+    a = verdict(torch.tensor([[0.30, 0.29, 0.29], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]]))
+    b = verdict(torch.tensor([[0.30, 0.292, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]]))
+    assert a.sep_min > b.sep_min
+    assert a.j < b.j
+
+
+def test_alignment_is_the_worst_diagonal_entry() -> None:
+    s = torch.tensor([[0.30, 0.1, 0.1], [0.1, 0.25, 0.1], [0.1, 0.1, 0.28]])
+    assert alignment(s) == pytest.approx(0.25)
+
+
+def test_concealment_is_chance_when_nothing_is_distinguishable() -> None:
+    assert concealment(torch.full((2, 2), 0.3), LOGIT_SCALE) == pytest.approx(0.5)
+    assert concealment(torch.full((4, 4), 0.3), LOGIT_SCALE) == pytest.approx(0.25)
+
+
+def test_concealment_averages_both_softmax_directions() -> None:
+    """A prompt that every view likes hurts the column direction, not the rows.
+
+    With an equal diagonal the two directions see the same two margins, so the
+    diagonal is made unequal here to keep the check from passing by accident.
+    """
+    s = torch.tensor([[0.30, 0.20], [0.29, 0.35]])
+    rows = (s * LOGIT_SCALE).softmax(-1).diagonal().mean()
+    cols = (s * LOGIT_SCALE).softmax(-2).diagonal().mean()
+    assert concealment(s, LOGIT_SCALE) == pytest.approx(float((rows + cols) / 2))
+    assert rows != pytest.approx(cols)
+
+
+# -- perceptual helpers kept from the two-view days ---------------------------
 
 
 def test_blur_params_match_inverse_view_rule() -> None:
@@ -130,10 +200,22 @@ def test_far_view_removes_high_frequency_energy(far_fn) -> None:
     assert far.std() < img.std()
 
 
+@pytest.mark.parametrize("fn", [far_view, far_view_resize])
+def test_perceptual_helpers_treat_a_batch_as_a_batch(fn) -> None:
+    """(B, C, H, W) must give the same answer per image as (C, H, W) does."""
+    torch.manual_seed(0)
+    batch = torch.rand(2, 3, 64, 64)
+    out = fn(batch)
+    assert out.shape == batch.shape
+    torch.testing.assert_close(out[1], fn(batch[1]), rtol=1e-4, atol=1e-5)
+
+
 @pytest.mark.slow
 def test_known_good_example_scores_above_chance() -> None:
     """Step 0-1. Requires CUDA and the CLIP/BLIP weights."""
     from ava.image.judge import ClipBlipJudge, load_image
+    from ava.image.tasks import get_task
+    from ava.image.views import ViewSet
 
     if not SMOKE_IMAGE.exists():
         pytest.skip(f"{SMOKE_IMAGE} not generated")
@@ -141,7 +223,7 @@ def test_known_good_example_scores_above_chance() -> None:
         pytest.skip("CUDA not available")
 
     judge = ClipBlipJudge(use_blip=False)
-    verdict = judge.evaluate(load_image(SMOKE_IMAGE), SMOKE_SPEC)
+    viewset = ViewSet.build(get_task("hybrid"))
+    verdict = judge.evaluate(load_image(SMOKE_IMAGE), SMOKE_SPEC, viewset)
 
-    assert verdict.p_far > 0.5, f"far view failed: {verdict.to_json()}"
-    assert verdict.p_near > 0.5, f"near view failed: {verdict.to_json()}"
+    assert verdict.holds == [True, True], verdict.to_json()

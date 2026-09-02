@@ -1,21 +1,31 @@
 """Vocabulary database: the bandit arms and their Beta posteriors.
 
-An arm is a (word, role) pair, not a word. That way "einstein works as the
-low-frequency subject but not as the high-frequency one" is expressible as
-data, and no one has to predict a new word's role in advance. Predicting it
-from CLIP text similarity would not work: CLIP's text embedding clusters by
-semantic topic, not by spatial-frequency behaviour. Both arms exist
-independently and Thompson sampling tries both.
+An arm is a (word, task, role) triple, not a word. "einstein works as the
+low-frequency subject of a hybrid but not as the high-frequency one, and works
+either way in a flip" is expressible as data, and no one has to predict a new
+word's behaviour in advance. Predicting it from CLIP text similarity would not
+work: CLIP's text embedding clusters by semantic topic, not by how a subject
+survives blurring or rotation. Every arm exists independently and Thompson
+sampling tries each.
+
+`role` is the slot's role from `ava.image.tasks`: `low` / `high` / `mid` /
+`gray` / `color` / `moving` / `still` for the asymmetric Factorized Diffusion
+slots, `subject` for every Visual Anagrams slot (swapping the two prompts of a
+flip gives the same illusion flipped), and `style` for the style arm.
 
 The database lives at runs/vocab.db and is shared across runs on purpose. The
 accumulated estimate of which prompts work is the asset this system builds; a
 per-run reset would throw it away. Run-specific progress belongs in state.json.
 
-Seeding policy: the initial database contains ONLY strings that literally occur
-in dev/visual_anagrams (its tests/*.sh, readme.md, readme_factorized_diffusion.md).
-LLM-generated and BLIP-mined words enter later as untried arms, never as seeds.
-tests/test_vocab_seed.py enforces this mechanically, because seeds that merely
-sounded plausible have been introduced by mistake before.
+Seeding policy: `source='author'` arms are strings that literally occur in
+dev/visual_anagrams (its tests/*.sh and readmes); `source='paper'` arms are
+prompts quoted verbatim from the two papers, each with a figure citation
+(`ava.image.paper_examples`). LLM-generated and BLIP-mined words enter later as
+untried arms, never as seeds. tests/test_vocab_seed.py enforces the provenance
+mechanically, because seeds that merely sounded plausible have been introduced
+by mistake before. Priors are Beta(1, 1) unless the upstream readme states a
+preference; the paper's stated preferences are recorded as citations, not as
+priors, so the data decides.
 """
 
 from __future__ import annotations
@@ -23,68 +33,63 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 
-Role = Literal["low", "high", "style"]
-ROLES: tuple[Role, ...] = ("low", "high", "style")
-
-SUBJECT_ROLES: tuple[Role, ...] = ("low", "high")
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS arm (
     word              TEXT    NOT NULL,
-    role              TEXT    NOT NULL CHECK (role IN ('low', 'high', 'style')),
+    task              TEXT    NOT NULL,
+    role              TEXT    NOT NULL,
     source            TEXT    NOT NULL,
     alpha             REAL    NOT NULL CHECK (alpha > 0),
     beta              REAL    NOT NULL CHECK (beta  > 0),
     n_trials          INTEGER NOT NULL DEFAULT 0,
     first_seen_round  INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (word, role)
+    citation          TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (word, task, role)
 );
 """
 
+STYLE = "style"
+SUBJECT = "subject"
+
+UNIFORM_PRIOR = (1.0, 1.0)
+AUTHOR_SOURCE = "author"
+PAPER_SOURCE = "paper"
+
 # ---------------------------------------------------------------------------
-# Seed vocabulary. Every string below must occur verbatim somewhere in
-# dev/visual_anagrams; see the module docstring.
+# Seed vocabulary from the upstream checkout. Every string below must occur
+# verbatim somewhere in dev/visual_anagrams; see the module docstring.
 # ---------------------------------------------------------------------------
 
-# Tier 1: role is directly observable in a Factorized Diffusion example.
-TIER1: tuple[tuple[str, Role], ...] = (
+# Hybrid images, tier 1: role is directly observable in a Factorized Diffusion
+# example. These priors predate the task split and carry real trials in
+# existing databases, so they are left as they were.
+HYBRID_TIER1: tuple[tuple[str, str], ...] = (
     ("a panda", "low"),  # hybrid example, low_pass side
     ("a flower arrangement", "high"),  # hybrid example, high_pass side
     ("a yin yang", "low"),  # triple_low_pass
     ("waterfalls", "high"),  # triple_high_pass, and the inverse example
     ("albert einstein", "low"),  # inverse example, low_pass reference image
 )
-TIER1_PRIOR = (3.0, 1.0)
+HYBRID_TIER1_PRIOR = (3.0, 1.0)
 
 # Tier 2: the readme's tips section states the role explicitly.
-#   "faces are very good subjects to hide"  -> low, in a hybrid: a face
-#   survives blurring (the classic Einstein/Marilyn construction).
-#   "subjects with freedom in how they are depicted are good" -> high, these
-#   are distinguished by fine detail.
-TIER2: tuple[tuple[str, Role], ...] = (
+HYBRID_TIER2: tuple[tuple[str, str], ...] = (
     ("marilyn monroe", "low"),
     ("an old man", "low"),
     ("houseplants", "high"),
     ("wine and cheese", "high"),
     ("a kitchen", "high"),
 )
-TIER2_PRIOR = (2.0, 1.0)
+HYBRID_TIER2_PRIOR = (2.0, 1.0)
 
-# Tier 3: real prompts from the other view types (flip / rotate / jigsaw /
-# skew / negate / motion / scale / color). Those views have no low/high
-# distinction, so the role cannot be read off. Registered under BOTH roles with
-# a uniform prior and left for the data to decide.
-#
-# `a skull` appears in triple_medium_pass, which does not map onto either half
-# of a two-way hybrid, so it belongs here too. The intuition that a crisp
-# silhouette "must" be the low side is deliberately not used: the readme states
-# that intuition and reasoning are less reliable than search, and that applies
-# to the seeding as much as to the loop.
-TIER3: tuple[str, ...] = (
+# Tier 3: subjects from the other view types, registered under both hybrid
+# roles with a uniform prior and left for the data to decide.
+HYBRID_TIER3: tuple[str, ...] = (
     "a horse",
     "a snowy mountain village",
     "a landscape",
@@ -104,11 +109,9 @@ TIER3: tuple[str, ...] = (
     "birds",
     "a person",
 )
-UNIFORM_PRIOR = (1.0, 1.0)
 
-# Style arms. The tips section is explicit about the two extremes; the rest are
-# used upstream without any stated preference.
-STYLES: tuple[tuple[str, tuple[float, float]], ...] = (
+# Hybrid style arms. The readme tips are explicit about the two extremes.
+HYBRID_STYLES: tuple[tuple[str, tuple[float, float]], ...] = (
     ("an oil painting of", (3.0, 1.0)),  # "works well"
     ("a photo of", (1.0, 3.0)),  # "is hard"
     ("a lithograph of", UNIFORM_PRIOR),
@@ -119,7 +122,68 @@ STYLES: tuple[tuple[str, tuple[float, float]], ...] = (
     ("", UNIFORM_PRIOR),  # no style prefix
 )
 
-AUTHOR_SOURCE = "author"
+# Visual Anagrams subjects from the upstream tests and readme. Every VA task
+# gets the whole pool: the readme's own advice is that which subject suits which
+# view is unintuitive and has to be searched, so no word is withheld from a view.
+VA_SUBJECTS: tuple[str, ...] = (
+    "people around a campfire",  # flip
+    "an old man",
+    "a snowy mountain village",  # rotate_cw / rotate_ccw
+    "a horse",
+    "houseplants",  # jigsaw
+    "marilyn monroe",
+    "albert einstein",  # inner_circle
+    "a landscape",  # negate
+    "a lemur",  # patch_permute
+    "a kangaroo",
+    "a duck",  # pixel_permute, square_hinge
+    "a rabbit",
+    "a tudor portrait",  # skew
+    "a skull",
+    "a waterfall",  # three_view
+    "a teddy bear",
+)
+VA_TASKS: tuple[str, ...] = (
+    "flip",
+    "rotate_cw",
+    "rotate_ccw",
+    "rotate_180",
+    "skew",
+    "jigsaw",
+    "inner_circle",
+    "negate",
+    "patch_permute",
+    "pixel_permute",
+    "square_hinge",
+    "three_view",
+    "four_view",
+)
+
+# Factorized Diffusion tasks other than the plain hybrid, from the FD readme.
+# One example each, registered in the slot it was used in.
+FD_SUBJECTS: tuple[tuple[str, str, str], ...] = (
+    # (task, word, role)
+    ("triple_hybrid", "a yin yang", "low"),
+    ("triple_hybrid", "a skull", "mid"),
+    ("triple_hybrid", "waterfalls", "high"),
+    ("color_hybrid", "landscape", "gray"),
+    ("color_hybrid", "tiger", "color"),
+    ("motion_hybrid", "a panda", "moving"),
+    ("motion_hybrid", "a canyon", "still"),
+    ("inverse_hybrid", "waterfalls", "high"),
+)
+
+# Style arms for every non-hybrid task: the upstream styles plus the FD readme's
+# comma template, all uniform. Which style suits which view is left to the data.
+COMMON_STYLES: tuple[str, ...] = tuple(s for s, _ in HYBRID_STYLES) + (
+    "{}, oil painting style",  # FD readme: "landscape, oil painting style"
+)
+NON_HYBRID_TASKS: tuple[str, ...] = VA_TASKS + (
+    "triple_hybrid",
+    "color_hybrid",
+    "motion_hybrid",
+    "inverse_hybrid",
+)
 
 
 @dataclass(frozen=True)
@@ -127,12 +191,14 @@ class Arm:
     """One bandit arm and its Beta posterior."""
 
     word: str
-    role: Role
+    task: str
+    role: str
     source: str
     alpha: float
     beta: float
     n_trials: int
     first_seen_round: int
+    citation: str = ""
 
     @property
     def mean(self) -> float:
@@ -164,24 +230,73 @@ class Arm:
         return float(lo), float(hi)
 
 
+# ---------------------------------------------------------------------------
+# Connection and schema migration
+# ---------------------------------------------------------------------------
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Bring a database to SCHEMA_VERSION. Returns the version it started at.
+
+    Version 0 keyed arms on (word, role) and knew only the hybrid task. Its
+    rows are carried over as task='hybrid' with their posteriors intact: those
+    alpha/beta values are accumulated trials and must survive the schema change.
+    """
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version >= SCHEMA_VERSION:
+        return version
+
+    has_arm = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='arm'"
+    ).fetchone()
+    if has_arm and "task" not in _columns(conn, "arm"):
+        conn.executescript(
+            "ALTER TABLE arm RENAME TO arm_v0;"
+            + SCHEMA
+            + """
+            INSERT INTO arm (word, task, role, source, alpha, beta, n_trials,
+                             first_seen_round, citation)
+            SELECT word, 'hybrid', role, source, alpha, beta, n_trials,
+                   first_seen_round, ''
+            FROM arm_v0;
+            DROP TABLE arm_v0;
+            """
+        )
+    else:
+        conn.executescript(SCHEMA)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+    return version
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
-    """Open (creating if needed) the vocabulary database."""
+    """Open (creating or migrating if needed) the vocabulary database."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    conn.commit()
+    migrate(conn)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Arms
+# ---------------------------------------------------------------------------
 
 
 def add_arm(
     conn: sqlite3.Connection,
     word: str,
-    role: Role,
+    task: str,
+    role: str,
     source: str,
     prior: tuple[float, float] = UNIFORM_PRIOR,
     round_index: int = 0,
+    citation: str = "",
 ) -> bool:
     """Register an arm. Returns False if it was already present.
 
@@ -190,85 +305,110 @@ def add_arm(
     """
     cur = conn.execute(
         "INSERT OR IGNORE INTO arm "
-        "(word, role, source, alpha, beta, n_trials, first_seen_round) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?)",
-        (word, role, source, prior[0], prior[1], round_index),
+        "(word, task, role, source, alpha, beta, n_trials, first_seen_round, citation) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        (word, task, role, source, prior[0], prior[1], round_index, citation),
     )
     conn.commit()
     return cur.rowcount > 0
 
 
 def seed_author_vocab(conn: sqlite3.Connection) -> int:
-    """Insert the visual_anagrams-derived seed vocabulary. Idempotent."""
+    """Insert the dev/visual_anagrams-derived seed vocabulary. Idempotent."""
     added = 0
-    for word, role in TIER1:
-        added += add_arm(conn, word, role, AUTHOR_SOURCE, TIER1_PRIOR)
-    for word, role in TIER2:
-        added += add_arm(conn, word, role, AUTHOR_SOURCE, TIER2_PRIOR)
-    for word in TIER3:
-        for role in SUBJECT_ROLES:
-            added += add_arm(conn, word, role, AUTHOR_SOURCE, UNIFORM_PRIOR)
-    for style, prior in STYLES:
-        added += add_arm(conn, style, "style", AUTHOR_SOURCE, prior)
+    for word, role in HYBRID_TIER1:
+        added += add_arm(conn, word, "hybrid", role, AUTHOR_SOURCE, HYBRID_TIER1_PRIOR)
+    for word, role in HYBRID_TIER2:
+        added += add_arm(conn, word, "hybrid", role, AUTHOR_SOURCE, HYBRID_TIER2_PRIOR)
+    for word in HYBRID_TIER3:
+        for role in ("low", "high"):
+            added += add_arm(conn, word, "hybrid", role, AUTHOR_SOURCE, UNIFORM_PRIOR)
+    for style, prior in HYBRID_STYLES:
+        added += add_arm(conn, style, "hybrid", STYLE, AUTHOR_SOURCE, prior)
+
+    for task in VA_TASKS:
+        for word in VA_SUBJECTS:
+            added += add_arm(conn, word, task, SUBJECT, AUTHOR_SOURCE, UNIFORM_PRIOR)
+    for task, word, role in FD_SUBJECTS:
+        added += add_arm(conn, word, task, role, AUTHOR_SOURCE, UNIFORM_PRIOR)
+    for task in NON_HYBRID_TASKS:
+        for style in COMMON_STYLES:
+            added += add_arm(conn, style, task, STYLE, AUTHOR_SOURCE, UNIFORM_PRIOR)
     return added
 
 
 def _row_to_arm(row: sqlite3.Row) -> Arm:
     return Arm(
         word=row["word"],
+        task=row["task"],
         role=row["role"],
         source=row["source"],
         alpha=row["alpha"],
         beta=row["beta"],
         n_trials=row["n_trials"],
         first_seen_round=row["first_seen_round"],
+        citation=row["citation"],
     )
 
 
-def list_arms(conn: sqlite3.Connection, role: Role | None = None) -> list[Arm]:
-    if role is None:
-        rows = conn.execute("SELECT * FROM arm").fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM arm WHERE role = ?", (role,)).fetchall()
+def list_arms(
+    conn: sqlite3.Connection, task: str | None = None, role: str | None = None
+) -> list[Arm]:
+    clauses, params = [], []
+    if task is not None:
+        clauses.append("task = ?")
+        params.append(task)
+    if role is not None:
+        clauses.append("role = ?")
+        params.append(role)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(f"SELECT * FROM arm{where}", params).fetchall()
     return [_row_to_arm(r) for r in rows]
 
 
-def untried_arms(conn: sqlite3.Connection, role: Role) -> list[Arm]:
+def list_tasks(conn: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT DISTINCT task FROM arm ORDER BY task")]
+
+
+def untried_arms(conn: sqlite3.Connection, task: str, role: str) -> list[Arm]:
     """Arms that have never been evaluated; the new-word injection quota draws here."""
     rows = conn.execute(
-        "SELECT * FROM arm WHERE role = ? AND n_trials = 0", (role,)
+        "SELECT * FROM arm WHERE task = ? AND role = ? AND n_trials = 0", (task, role)
     ).fetchall()
     return [_row_to_arm(r) for r in rows]
 
 
-def update_arm(conn: sqlite3.Connection, word: str, role: Role, p: float) -> None:
+def update_arm(
+    conn: sqlite3.Connection, word: str, task: str, role: str, p: float
+) -> None:
     """Fold one observation into the arm's posterior.
 
-    `p` is already a probability in [0, 1] (p_far for a low arm, p_near for a
-    high arm, J for a style arm), so alpha += p / beta += 1 - p is the natural
-    conjugate update and needs no scaling.
+    `p` is already a probability in [0, 1] (the view's own-prompt probability
+    for a subject arm, J for a style arm), so alpha += p / beta += 1 - p is the
+    natural conjugate update and needs no scaling.
     """
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"p must be a probability in [0, 1], got {p}")
     cur = conn.execute(
         "UPDATE arm SET alpha = alpha + ?, beta = beta + ?, n_trials = n_trials + 1 "
-        "WHERE word = ? AND role = ?",
-        (p, 1.0 - p, word, role),
+        "WHERE word = ? AND task = ? AND role = ?",
+        (p, 1.0 - p, word, task, role),
     )
     if cur.rowcount == 0:
-        raise KeyError(f"no such arm: ({word!r}, {role!r})")
+        raise KeyError(f"no such arm: ({word!r}, {task!r}, {role!r})")
     conn.commit()
 
 
 def thompson_sample(
     conn: sqlite3.Connection,
-    role: Role,
+    task: str,
+    role: str,
     rng: np.random.Generator,
     exclude: frozenset[str] = frozenset(),
 ) -> Arm:
-    """Draw one arm by Thompson sampling over the role's Beta posteriors."""
-    arms = [a for a in list_arms(conn, role) if a.word not in exclude]
+    """Draw one arm by Thompson sampling over the (task, role) Beta posteriors."""
+    arms = [a for a in list_arms(conn, task, role) if a.word not in exclude]
     if not arms:
-        raise LookupError(f"no available arms for role {role!r}")
+        raise LookupError(f"no available arms for ({task!r}, {role!r})")
     draws = rng.beta([a.alpha for a in arms], [a.beta for a in arms])
     return arms[int(np.argmax(draws))]
