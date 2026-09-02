@@ -79,7 +79,7 @@ def scatter(
     d.text(((left + right) // 2 - 60, bottom + 28), xlabel, font=f, fill=AXIS)
     d.text((6, top), f"{hi:+.2f}", font=f, fill=AXIS)
     d.text((6, bottom - 12), f"{lo:+.2f}", font=f, fill=AXIS)
-    d.text((6, (top + bottom) // 2), ylabel[:10], font=f, fill=AXIS)
+    d.text((left, 32), f"y: {ylabel}", font=f, fill=AXIS)
     d.text((right - 200, top + 6), "blue: full generation held", font=f, fill=HELD)
     d.text((right - 200, top + 22), "red: it did not", font=f, fill=LOST)
     out.parent.mkdir(parents=True, exist_ok=True)
