@@ -16,6 +16,9 @@ mechanisms and the entry records which one applies:
 
 This module is pure data so the search layer can read slot names and roles
 without importing torch; `ava.image.views` builds the actual view objects.
+The audio track registers its own task here (`ava.audio.tasks`), because the
+search layer only needs a task's slots and roles and does not care whether the
+views are spatial or temporal.
 
 A slot is one prompt position. Its `role` names the bandit arm family a word
 in that slot contributes evidence to. FD slots are asymmetric (a low-frequency
@@ -35,6 +38,7 @@ from dataclasses import dataclass
 
 VA = "VA"
 FD = "FD"
+AUDIO = "audio"  # the time-reversal anagram; views are defined by ava.audio
 
 SUBJECT = "subject"
 STYLE = "style"
@@ -71,8 +75,8 @@ class IllusionTask:
             )
         if self.reduction not in ("mean", "sum"):
             raise ValueError(f"{self.name}: reduction must be mean or sum")
-        if self.paper not in (VA, FD):
-            raise ValueError(f"{self.name}: paper must be VA or FD")
+        if self.paper not in (VA, FD, AUDIO):
+            raise ValueError(f"{self.name}: paper must be VA, FD or audio")
 
     @property
     def n_views(self) -> int:
@@ -227,8 +231,28 @@ TASKS: dict[str, IllusionTask] = {
 }
 
 
+# Tasks from other tracks (`ava.audio.tasks`). Kept apart from TASKS, which
+# stays the list of the two papers' example types that the image views, the
+# seed vocabularies and their tests enumerate.
+REGISTERED: dict[str, IllusionTask] = {}
+
+
+def register_task(task: IllusionTask) -> None:
+    """Make a task from another track visible to `get_task`. Idempotent."""
+    existing = TASKS.get(task.name) or REGISTERED.get(task.name)
+    if existing is None:
+        REGISTERED[task.name] = task
+    elif existing != task:
+        raise ValueError(f"a different task named {task.name!r} is already registered")
+
+
+def all_tasks() -> dict[str, IllusionTask]:
+    """Every task `get_task` can resolve: the papers' plus the registered ones."""
+    return {**TASKS, **REGISTERED}
+
+
 def get_task(name: str) -> IllusionTask:
-    try:
-        return TASKS[name]
-    except KeyError:
-        raise KeyError(f"unknown task {name!r}; known: {sorted(TASKS)}") from None
+    task = TASKS.get(name) or REGISTERED.get(name)
+    if task is None:
+        raise KeyError(f"unknown task {name!r}; known: {sorted(all_tasks())}")
+    return task
