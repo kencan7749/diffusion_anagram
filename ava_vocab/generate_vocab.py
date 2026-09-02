@@ -83,16 +83,21 @@ EXAMPLES_PER_PROMPT = 4
 # tests/test_vocab_generation.py asserts these columns still match.
 INSERT_COLUMNS = (
     "word",
+    "task",
     "role",
     "source",
     "alpha",
     "beta",
     "n_trials",
     "first_seen_round",
+    "citation",
 )
 LLM_SOURCE = "llm"
 UNIFORM_PRIOR = (1.0, 1.0)
-SUBJECT_ROLES = ("low", "high")
+# Which (task, role) arms a generated word is registered under, as "task:role".
+# The default is the hybrid image's two slots, which is what this generator was
+# built for; pass --arm to register words for other tasks.
+DEFAULT_ARMS = ("hybrid:low", "hybrid:high")
 
 _VALID = re.compile(r"^[a-z][a-z '\-]{2,48}$")
 # Positional words describe where something is, never what it is.
@@ -170,6 +175,7 @@ class SamplingConfig:
 @dataclass(frozen=True)
 class Suggestion:
     word: str
+    task: str
     role: str
 
 
@@ -246,14 +252,25 @@ def clean(continuations) -> list[str]:
     return out
 
 
-def as_suggestions(words: list[str]) -> list[Suggestion]:
-    """Register both roles for every word.
+def parse_arm(spec: str) -> tuple[str, str]:
+    """`"hybrid:low"` -> `("hybrid", "low")`."""
+    task, sep, role = spec.partition(":")
+    if not sep or not task or not role:
+        raise SystemExit(f"--arm must look like task:role, got {spec!r}")
+    return task, role
+
+
+def as_suggestions(
+    words: list[str], arms: tuple[str, ...] = DEFAULT_ARMS
+) -> list[Suggestion]:
+    """Register every word under every requested (task, role) arm.
 
     No role is inferred. List continuation gives no signal about spatial
-    frequency, and a guess would not be trusted even if it did: both arms exist
-    independently and the bandit tries both.
+    frequency, and a guess would not be trusted even if it did: every arm
+    exists independently and the bandit tries each.
     """
-    return [Suggestion(w, role) for w in words for role in SUBJECT_ROLES]
+    parsed = [parse_arm(a) for a in arms]
+    return [Suggestion(w, task, role) for w in words for task, role in parsed]
 
 
 def require_schema(conn: sqlite3.Connection) -> None:
@@ -286,7 +303,7 @@ def insert_suggestions(
     for s in suggestions:
         cur = conn.execute(
             statement,
-            (s.word, s.role, LLM_SOURCE, *UNIFORM_PRIOR, 0, round_index),
+            (s.word, s.task, s.role, LLM_SOURCE, *UNIFORM_PRIOR, 0, round_index, ""),
         )
         added += cur.rowcount
     conn.commit()
@@ -392,6 +409,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cpu", help="CPU keeps the GPU for the loop")
     p.add_argument("--round", type=int, default=0)
     p.add_argument(
+        "--arm",
+        action="append",
+        default=None,
+        metavar="TASK:ROLE",
+        help="register words under this arm; repeatable "
+        f"(default: {' '.join(DEFAULT_ARMS)})",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -453,7 +478,8 @@ def main(argv: list[str] | None = None) -> None:
     conn = sqlite3.connect(args.db)
     try:
         require_schema(conn)
-        added = insert_suggestions(conn, as_suggestions(words), args.round)
+        arms = tuple(args.arm) if args.arm else DEFAULT_ARMS
+        added = insert_suggestions(conn, as_suggestions(words, arms), args.round)
     finally:
         conn.close()
 

@@ -23,10 +23,10 @@ from ava.vocab import (
     update_arm,
 )
 from ava_vocab.generate_vocab import (
+    DEFAULT_ARMS,
     EXEMPLARS,
     INSERT_COLUMNS,
     LLM_SOURCE,
-    SUBJECT_ROLES,
     SamplingConfig,
     Suggestion,
     as_suggestions,
@@ -77,9 +77,10 @@ def test_prompt_rotates_its_exemplars() -> None:
 
 def test_exemplars_are_seed_vocabulary() -> None:
     """Conditioning must not smuggle in vocabulary the project never committed to."""
-    from ava.vocab import TIER1, TIER2, TIER3
+    from ava.vocab import HYBRID_TIER1, HYBRID_TIER2, HYBRID_TIER3
 
-    seeded = {w for w, _ in TIER1} | {w for w, _ in TIER2} | set(TIER3)
+    seeded = {w for w, _ in HYBRID_TIER1} | {w for w, _ in HYBRID_TIER2}
+    seeded |= set(HYBRID_TIER3)
     assert set(EXEMPLARS) <= seeded
 
 
@@ -161,11 +162,25 @@ def test_clean_preserves_order_and_drops_duplicates() -> None:
 # -- roles ---------------------------------------------------------------
 
 
-def test_both_roles_are_registered_for_every_word() -> None:
+def test_both_hybrid_roles_are_registered_for_every_word() -> None:
     """No role is inferred; list continuation carries no frequency signal."""
     suggestions = as_suggestions(["a gecko"])
-    assert {s.role for s in suggestions} == set(SUBJECT_ROLES)
+    assert {(s.task, s.role) for s in suggestions} == {
+        ("hybrid", "low"),
+        ("hybrid", "high"),
+    }
     assert {s.word for s in suggestions} == {"a gecko"}
+    assert DEFAULT_ARMS == ("hybrid:low", "hybrid:high")
+
+
+def test_arms_can_target_other_tasks() -> None:
+    suggestions = as_suggestions(["a gecko"], arms=("flip:subject", "hybrid:low"))
+    assert {(s.task, s.role) for s in suggestions} == {
+        ("flip", "subject"),
+        ("hybrid", "low"),
+    }
+    with pytest.raises(SystemExit):
+        as_suggestions(["a gecko"], arms=("flip",))
 
 
 # -- sampling ------------------------------------------------------------
@@ -218,9 +233,9 @@ def test_greedy_with_multiple_draws_is_refused() -> None:
 
 def test_inserted_words_are_untried_with_a_uniform_prior(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
-    assert insert_suggestions(conn, [Suggestion("a lighthouse", "low")]) == 1
+    assert insert_suggestions(conn, [Suggestion("a lighthouse", "hybrid", "low")]) == 1
 
-    arm = next(a for a in list_arms(conn, "low") if a.word == "a lighthouse")
+    arm = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a lighthouse")
     assert (arm.alpha, arm.beta) == (1.0, 1.0)
     assert arm.n_trials == 0
     assert arm.source == LLM_SOURCE
@@ -230,11 +245,11 @@ def test_insertion_never_resets_an_arm_that_has_evidence(tmp_path: Path) -> None
     """A re-sampled word must keep the trials it already earned."""
     conn = connect(tmp_path / "vocab.db")
     seed_author_vocab(conn)
-    update_arm(conn, "a panda", "low", 1.0)
-    before = next(a for a in list_arms(conn, "low") if a.word == "a panda")
+    update_arm(conn, "a panda", "hybrid", "low", 1.0)
+    before = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a panda")
 
-    assert insert_suggestions(conn, [Suggestion("a panda", "low")]) == 0
-    after = next(a for a in list_arms(conn, "low") if a.word == "a panda")
+    assert insert_suggestions(conn, [Suggestion("a panda", "hybrid", "low")]) == 0
+    after = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a panda")
     assert (after.alpha, after.n_trials, after.source) == (
         before.alpha,
         before.n_trials,
@@ -247,12 +262,12 @@ def test_generated_words_become_injectable_arms(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
     seed_author_vocab(conn)
     for arm in list_arms(conn):
-        update_arm(conn, arm.word, arm.role, 0.5)
-    assert untried_arms(conn, "low") == []
+        update_arm(conn, arm.word, arm.task, arm.role, 0.5)
+    assert untried_arms(conn, "hybrid", "low") == []
 
     insert_suggestions(conn, as_suggestions(["a lighthouse"]))
-    assert [a.word for a in untried_arms(conn, "low")] == ["a lighthouse"]
-    assert [a.word for a in untried_arms(conn, "high")] == ["a lighthouse"]
+    assert [a.word for a in untried_arms(conn, "hybrid", "low")] == ["a lighthouse"]
+    assert [a.word for a in untried_arms(conn, "hybrid", "high")] == ["a lighthouse"]
 
 
 def test_provenance_records_seed_and_hyperparameters(tmp_path: Path) -> None:
