@@ -17,3 +17,8 @@ runs*/
 
 # Local working state: each contributor accumulates their own.
 .claude/tasks/
+
+# Papers. Publisher PDFs, tens of MB, and git keeps them forever once they are
+# in. Cite them in prose instead; they are inputs to read, not artifacts to
+# version.
+references/
