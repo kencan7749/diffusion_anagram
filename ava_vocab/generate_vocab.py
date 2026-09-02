@@ -36,6 +36,7 @@ import re
 import sqlite3
 import sys
 import zlib
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,6 +134,136 @@ _BLOCKED = frozenset(
     "isis shooting stabbed torture tortured abuse abused molested pedophile "
     "lynching genocide".split()
 )
+
+
+# ---------------------------------------------------------------------------
+# List formats: what the model is asked to continue, and what counts as an item
+# ---------------------------------------------------------------------------
+
+# Cues that a sound description says how it starts or ends. A generated line
+# without one is a sound, not an *envelope*, and the reversal anagram is built
+# on envelopes (Step 0a: CLAP hears the envelope flip, not the pitch).
+_ENVELOPE_CUES = frozenset(
+    "then fading fades rising rises swell swelling swells building builds decay "
+    "decays decaying stop stops stopping silence cut dying ringing growing "
+    "louder quieter away echo echoing trailing tail burst crescendo".split()
+)
+_SOUND_VALID = re.compile(r"^[a-z][a-z0-9 ,'\-]{14,89}$")
+# The first dry run produced "people being shot" and "a couple hitting each
+# other" among ordinary sounds. Weapons and violence against people are
+# refused at the source, as the subject list does; a gunshot is a real
+# percussive sound, but nothing here needs it.
+_SOUND_BLOCKED = _BLOCKED | frozenset(
+    "gun guns gunshot gunshots shot shots shooting rifle pistol bomb bombs "
+    "bombing grenade stabbing screaming scream screams".split()
+)
+_SOUND_BLOCKED_PHRASES = ("people being", "hitting each other", "each other")
+
+
+# Exemplars are sentences from ava/audio/vocab.py (the Step 1 pairs and a few
+# of the authored decays and swells), so the conditioning introduces nothing
+# the audio track has not already committed to. Twelve rather than six: with
+# fewer, successive draws riffed on one example ("... out of a balloon").
+SOUND_EXEMPLARS: tuple[str, ...] = (
+    "a match being struck, sharp attack then a slow decay",
+    "a balloon being inflated, building up to a stop",
+    "a large bell struck once, ringing and slowly fading",
+    "wind building from a whisper to a gust, then sudden silence",
+    "a hammer hitting an anvil once, ringing out",
+    "a fire dying down into silence, then stopping",
+    "a door slamming shut, the echo dying away",
+    "a train approaching, getting louder, then a sudden cut",
+    "air rushing out of a balloon, fading away",
+    "a metallic sound swelling out of silence to a sudden stop",
+    "a stone dropped into water, the splash settling",
+    "a kettle whistle rising to full pitch, then stopping at once",
+)
+
+
+def extract_sound(item: str) -> str | None:
+    """Validate one list item as an envelope description, or return None.
+
+    Looser than `extract_phrase` -- commas are part of the sentence here, not
+    the list separator -- and stricter in one way: the line must say how the
+    sound starts or ends, or it is useless to the time-reversal task.
+    """
+    phrase = " ".join(item.lower().strip().lstrip("-*• ").strip("\"'“”.:;!?").split())
+    if not _SOUND_VALID.match(phrase):
+        return None
+    words = re.findall(r"[a-z']+", phrase)
+    if len(words) < 3 or len(words) > 14:  # too short to be a sound, or prose
+        return None
+    if words[0] in _FUNCTION_FIRST or words[0] == "the":
+        return None
+    if any(w in _SOUND_BLOCKED for w in words):
+        return None
+    if any(bad in phrase for bad in _SOUND_BLOCKED_PHRASES):
+        return None
+    if any(ex in phrase for ex in SOUND_EXEMPLARS):  # riffing on the example
+        return None
+    if not any(w in _ENVELOPE_CUES for w in words):
+        return None
+    return phrase
+
+
+@dataclass(frozen=True)
+class ListFormat:
+    """How a list is presented to the model and read back from it.
+
+    `prompt` is a template with `{examples}`; `joiner` joins the exemplars in
+    it; `separator` splits the continuation into items (a comma for short
+    noun phrases, a newline for sentences that contain commas of their own);
+    `validate` turns one raw item into a clean entry or rejects it.
+    """
+
+    name: str
+    prompt: str
+    exemplars: tuple[str, ...]
+    validate: Callable[[str], str | None]
+    examples_per_prompt: int = 4
+    joiner: str = ", "
+    separator: str = ","
+    max_new_tokens: int = 48
+
+    def build_prompt(self, draw: int) -> str:
+        """Condition draw `draw` on its own rotating slice of the exemplars."""
+        n = self.examples_per_prompt
+        picked = [
+            self.exemplars[(draw * n + i) % len(self.exemplars)] for i in range(n)
+        ]
+        return self.prompt.format(examples=self.joiner.join(picked))
+
+    def split(self, continuation: str) -> list[str]:
+        """Cut a continuation into raw items, stopping where the list ends."""
+        if self.separator == ",":
+            return split_items(continuation)
+        items: list[str] = []
+        for k, line in enumerate(continuation.split("\n")):
+            stripped = line.strip()
+            if k > 0 and not stripped.startswith("-"):
+                break  # the model has left the bulleted list
+            if stripped.lstrip("- ").strip():
+                items.append(stripped)
+        return items
+
+    def dedup_key(self, entry: str) -> str:
+        return dedup_key(entry) if self.separator == "," else entry
+
+    def clean(self, continuations: Sequence[str]) -> list[str]:
+        """Validated, de-duplicated entries in first-seen order."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for continuation in continuations:
+            for item in self.split(str(continuation)):
+                entry = self.validate(item)
+                if entry is None:
+                    continue
+                key = self.dedup_key(entry)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(entry)
+        return out
 
 
 @dataclass(frozen=True)
@@ -235,6 +366,35 @@ def dedup_key(phrase: str) -> str:
     return " ".join(words[1:] if words[0] in ("a", "an", "the") else words)
 
 
+SUBJECT_FORMAT = ListFormat(
+    name="subject",
+    prompt=LIST_PROMPT,
+    exemplars=EXEMPLARS,
+    validate=extract_phrase,
+    examples_per_prompt=EXAMPLES_PER_PROMPT,
+)
+
+SOUND_FORMAT = ListFormat(
+    name="sound",
+    # The header names ordinary sources; without it the model drifts to
+    # explosions and fireballs within a few draws (observed on the first run).
+    prompt=(
+        "Everyday sounds (doors, bells, water, wind, engines, voices, tools), "
+        "each described by how it starts and how it ends:\n- {examples}\n-"
+    ),
+    exemplars=SOUND_EXEMPLARS,
+    validate=extract_sound,
+    examples_per_prompt=3,
+    joiner="\n- ",
+    separator="\n",
+    max_new_tokens=96,
+)
+
+# Which format a task's vocabulary is written in. Anything not listed is a
+# painting subject.
+FORMATS_BY_TASK: dict[str, ListFormat] = {"time_reverse": SOUND_FORMAT}
+
+
 def clean(continuations) -> list[str]:
     """Turn raw continuations into validated, de-duplicated subject phrases."""
     seen: set[str] = set()
@@ -311,79 +471,146 @@ def insert_suggestions(
 
 
 def build_prompt(draw: int) -> str:
-    """Condition draw `draw` on its own rotating slice of the exemplars."""
-    picked = [
-        EXEMPLARS[(draw * EXAMPLES_PER_PROMPT + i) % len(EXEMPLARS)]
-        for i in range(EXAMPLES_PER_PROMPT)
-    ]
-    return LIST_PROMPT.format(examples=", ".join(picked))
+    """The subject format's prompt for draw `draw`."""
+    return SUBJECT_FORMAT.build_prompt(draw)
+
+
+class ListSampler:
+    """GPT-2 held resident, sampling list continuations in a given format.
+
+    Loading the model once matters when the loop asks for words every few
+    rounds; the CLI's one-shot `generate` is a thin wrapper over this.
+    """
+
+    def __init__(self, model_id: str = MODEL_ID, device: str = "cpu") -> None:
+        # Imported lazily so --dry-run tests and the test suite stay cheap.
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+        self.model_id = model_id
+        self.device = device
+        self.tokenizer = GPT2Tokenizer.from_pretrained(model_id)
+        self.model = GPT2LMHeadModel.from_pretrained(model_id).to(device).eval()
+
+    def sample(
+        self, sampling: SamplingConfig, fmt: ListFormat = SUBJECT_FORMAT
+    ) -> tuple[list[str], list[dict[str, object]]]:
+        """Sample `sampling.draws` continuations. Returns (entries, provenance)."""
+        import torch
+
+        words: list[str] = []
+        records: list[dict[str, object]] = []
+        for draw in range(sampling.draws):
+            prompt = fmt.build_prompt(draw)
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            prompt_len = int(inputs["input_ids"].shape[-1])
+
+            seed = sampling.seed_for(prompt, draw)
+            # Seeding the global RNG is what makes a sampled draw reproducible;
+            # transformers' generate() reads from it.
+            torch.manual_seed(seed)
+            kwargs: dict[str, object] = {
+                "max_new_tokens": max(sampling.max_new_tokens, fmt.max_new_tokens),
+                "pad_token_id": self.tokenizer.eos_token_id,
+            }
+            if sampling.greedy:
+                kwargs["do_sample"] = False
+            else:
+                kwargs.update(
+                    do_sample=True,
+                    temperature=sampling.temperature,
+                    top_p=sampling.top_p,
+                )
+            with torch.no_grad():
+                generated = self.model.generate(**inputs, **kwargs)
+            continuation = self.tokenizer.decode(
+                generated[0][prompt_len:], skip_special_tokens=True
+            )
+            found = fmt.clean([continuation])
+            words += found
+            records.append(
+                {
+                    "model": self.model_id,
+                    "format": fmt.name,
+                    "prompt": prompt,
+                    "draw": draw,
+                    "seed": seed,
+                    "continuation": continuation.strip()[:240],
+                    "n_usable": len(found),
+                    **sampling.as_dict(),
+                }
+            )
+
+        # De-duplicate across draws.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for word in words:
+            key = fmt.dedup_key(word)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(word)
+        return unique, records
 
 
 def generate(
-    model_id: str, sampling: SamplingConfig, device: str = "cpu"
+    model_id: str,
+    sampling: SamplingConfig,
+    device: str = "cpu",
+    fmt: ListFormat = SUBJECT_FORMAT,
 ) -> tuple[list[str], list[dict[str, object]]]:
-    """Sample list continuations. Returns (words, provenance records).
+    """One-shot sampling: load the model, draw, return (words, provenance)."""
+    return ListSampler(model_id, device).sample(sampling, fmt)
 
-    Imported lazily so --dry-run tests and the test suite stay cheap.
+
+class LlmSupply:
+    """Vocabulary supply the loops call between rounds.
+
+    `supply(conn, task, role, round_index)` samples a few continuations in
+    the task's format, inserts what survives validation as untried arms of
+    (task, role) with `source='llm'`, and appends the provenance. Each call
+    uses a seed derived from the round and the call count, so successive calls
+    keep drawing new words rather than repeating the first draw. The model
+    stays resident on `device` (CPU by default: the GPU is the sampler's).
     """
-    import torch
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
-    tokenizer = GPT2Tokenizer.from_pretrained(model_id)
-    model = GPT2LMHeadModel.from_pretrained(model_id).to(device).eval()
+    def __init__(
+        self,
+        model_id: str = MODEL_ID,
+        device: str = "cpu",
+        draws: int = 10,
+        seed: int = 0,
+        log_path: Path | None = None,
+        formats: dict[str, ListFormat] | None = None,
+    ) -> None:
+        self.draws = draws
+        self.seed = seed
+        self.log_path = log_path
+        self.formats = dict(FORMATS_BY_TASK if formats is None else formats)
+        self._sampler = ListSampler(model_id, device)
+        self._calls: dict[int, int] = {}
 
-    words: list[str] = []
-    records: list[dict[str, object]] = []
-    for draw in range(sampling.draws):
-        prompt = build_prompt(draw)
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        prompt_len = int(inputs["input_ids"].shape[-1])
+    def format_for(self, task: str) -> ListFormat:
+        return self.formats.get(task, SUBJECT_FORMAT)
 
-        seed = sampling.seed_for(prompt, draw)
-        # Seeding the global RNG is what makes a sampled draw reproducible;
-        # transformers' generate() reads from it.
-        torch.manual_seed(seed)
-        kwargs: dict[str, object] = {
-            "max_new_tokens": sampling.max_new_tokens,
-            "pad_token_id": tokenizer.eos_token_id,
-        }
-        if sampling.greedy:
-            kwargs["do_sample"] = False
-        else:
-            kwargs.update(
-                do_sample=True,
-                temperature=sampling.temperature,
-                top_p=sampling.top_p,
+    def supply(
+        self, conn: sqlite3.Connection, task: str, role: str, round_index: int
+    ) -> int:
+        n = self._calls.get(round_index, 0)
+        self._calls[round_index] = n + 1
+        sampling = SamplingConfig(
+            seed=self.seed + 104_729 * round_index + 7_919 * n, draws=self.draws
+        )
+        words, records = self._sampler.sample(sampling, self.format_for(task))
+        added = insert_suggestions(
+            conn, [Suggestion(w, task, role) for w in words], round_index
+        )
+        if self.log_path is not None:
+            write_provenance(
+                self.log_path,
+                [{**r, "task": task, "role": role} for r in records],
+                added,
             )
-        with torch.no_grad():
-            generated = model.generate(**inputs, **kwargs)
-        continuation = tokenizer.decode(
-            generated[0][prompt_len:], skip_special_tokens=True
-        )
-        found = clean([continuation])
-        words += found
-        records.append(
-            {
-                "model": model_id,
-                "prompt": prompt,
-                "draw": draw,
-                "seed": seed,
-                "continuation": continuation.strip()[:160],
-                "n_usable": len(found),
-                **sampling.as_dict(),
-            }
-        )
-
-    # De-duplicate across draws, article-insensitively.
-    seen: set[str] = set()
-    unique: list[str] = []
-    for word in words:
-        key = dedup_key(word)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(word)
-    return unique, records
+        return added
 
 
 def write_provenance(
@@ -407,6 +634,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", type=Path, default=Path("runs/vocab.db"))
     p.add_argument("--model", default=MODEL_ID)
     p.add_argument("--device", default="cpu", help="CPU keeps the GPU for the loop")
+    p.add_argument(
+        "--format",
+        choices=("subject", "sound"),
+        default="subject",
+        help="subject: painting subjects (comma list); sound: envelope sentences "
+        "for the time-reversal task (bulleted list)",
+    )
     p.add_argument("--round", type=int, default=0)
     p.add_argument(
         "--arm",
@@ -463,7 +697,8 @@ def main(argv: list[str] | None = None) -> None:
             "use sampling."
         )
 
-    words, records = generate(args.model, sampling, args.device)
+    fmt = SOUND_FORMAT if args.format == "sound" else SUBJECT_FORMAT
+    words, records = generate(args.model, sampling, args.device, fmt)
     print(
         f"{len(words)} distinct words from {len(records)} continuations",
         file=sys.stderr,

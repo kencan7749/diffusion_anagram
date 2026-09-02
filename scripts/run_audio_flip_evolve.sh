@@ -5,7 +5,7 @@
 # `time_reverse` task with --proposer evolve. The vocabulary is the authored
 # envelope prompts in ava/audio/vocab.py (decays and swells), registered in
 # the shared runs/vocab.db on first use. Each candidate is one Stable Audio
-# Open generation (two branches in one batch, 100 steps, 10 s) scored by CLAP
+# Open generation (two branches in one batch, 100 steps, 5 s) scored by CLAP
 # in both directions; both directions are written as WAV beside the scores.
 #
 # Budget at the defaults: 6 rounds x 6 candidates = 36 generations, of which
@@ -14,6 +14,10 @@
 #   scripts/run_audio_flip_evolve.sh                  # defaults
 #   ROUNDS=10 K=6 scripts/run_audio_flip_evolve.sh    # longer
 #   STEPS=50 scripts/run_audio_flip_evolve.sh         # cheaper generations
+#   DURATION=3 scripts/run_audio_flip_evolve.sh       # shorter clips
+#
+# The vocabulary grows during the run: whenever fewer than 8 untried arms are
+# left, GPT-2 (on the CPU) is asked for new envelope sentences.
 #
 # Afterwards: runs/<RUN_ID>/audition.md lists what held, with the files to
 # play, and scripts/search_summary.py shows what the archive learned.
@@ -27,6 +31,7 @@ ROUNDS="${ROUNDS:-6}"
 K="${K:-6}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-100}"
+DURATION="${DURATION:-5}"
 CLUSTERS="${CLUSTERS:-4}"
 ETA="${ETA:-0.95}"
 RACE_FRACTION="${RACE_FRACTION:-0.3}"
@@ -35,7 +40,7 @@ MAX_SEEDS="${MAX_SEEDS:-4}"
 mkdir -p runs
 LOG="runs/${RUN_ID}.log"
 echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SEED}" \
-     "steps=${STEPS} clusters=${CLUSTERS} eta=${ETA} race_fraction=${RACE_FRACTION}" \
+     "steps=${STEPS} duration=${DURATION} clusters=${CLUSTERS} eta=${ETA} race_fraction=${RACE_FRACTION}" \
      "max_seeds=${MAX_SEEDS}" | tee -a "$LOG"
 
 .venv/bin/python -m ava.audio.loop \
@@ -44,6 +49,7 @@ echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SE
     -k "$K" \
     --seed "$SEED" \
     --steps "$STEPS" \
+    --duration "$DURATION" \
     --proposer evolve \
     --clusters "$CLUSTERS" \
     --eta "$ETA" \

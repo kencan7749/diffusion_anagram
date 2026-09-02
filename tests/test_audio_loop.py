@@ -251,7 +251,7 @@ def test_bandit_run_assigns_credit_to_the_audio_arms(wired) -> None:
     assert all(s.duration_s == config.duration_s for s in engine.calls)
     assert all(s.num_inference_steps == 100 for s in engine.calls)
     written = paths.config.read_text()
-    assert "proposer: bandit" in written and "duration_s: 10.0" in written
+    assert "proposer: bandit" in written and "duration_s: 5.0" in written
 
 
 def test_audition_lists_held_candidates_best_first_and_counts_the_rest(

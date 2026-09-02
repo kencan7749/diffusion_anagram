@@ -44,7 +44,15 @@ from ava.audio.tasks import TIME_REVERSE
 from ava.audio.vocab import seed_audio_vocab
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import get_task
-from ava.loop import PROPOSERS, RunPaths, load_state, write_prompt_card
+from ava.loop import (
+    PROPOSERS,
+    SUPPLIES,
+    RunPaths,
+    build_supply,
+    load_state,
+    top_up_vocabulary,
+    write_prompt_card,
+)
 from ava.metric import alignment, concealment, multiway_probs
 from ava.propose import (
     BanditProposer,
@@ -58,10 +66,15 @@ from ava.report import load_scores, rank_score, write_components, write_round_re
 from ava.search.evolve import EvolutionaryProposer, SearchConfig
 from ava.search.racing import RacingConfig
 from ava.spec import CandidateSpec, RunState, Verdict
+from ava.supply import SupplyPolicy, VocabSupply
 from ava.vocab import connect
 
 DEFAULT_RUNS_DIR = Path("runs")
 VOCAB_FILENAME = "vocab.db"
+# The search's clip length. Shorter than AudioCandidateSpec's 10 s default:
+# an envelope states itself in a couple of seconds, generation time scales
+# with length, and CLAP pads anything under its 10 s window anyway.
+LOOP_DURATION_S = 5.0
 
 
 @dataclass
@@ -73,7 +86,7 @@ class AudioLoopConfig:
     k: int = 6
     seed: int = 0
     screening_seed: int = 0
-    duration_s: float = DURATION_S
+    duration_s: float = LOOP_DURATION_S
     guidance_scale: float = GUIDANCE_SCALE
     num_inference_steps: int = NUM_INFERENCE_STEPS
     negative_prompt: str = NEGATIVE_PROMPT
@@ -84,10 +97,17 @@ class AudioLoopConfig:
     min_j: float | None = 0.5
     proposer: str = "bandit"
     search: dict[str, Any] = field(default_factory=lambda: SearchConfig().to_dict())
+    # In-run vocabulary supply, as in the image loop; the sound format asks
+    # GPT-2 for envelope sentences rather than painting subjects.
+    supply: str = "none"
+    supply_min_untried: int = 8
+    supply_draws: int = 10
     device: str = "cuda"
     task: str = TIME_REVERSE.name
 
     def __post_init__(self) -> None:
+        if self.supply not in SUPPLIES:
+            raise ValueError(f"supply must be one of {SUPPLIES}, got {self.supply}")
         if self.proposer not in PROPOSERS:
             raise ValueError(
                 f"proposer must be one of {PROPOSERS}, got {self.proposer}"
@@ -95,6 +115,9 @@ class AudioLoopConfig:
 
     def mix(self) -> ProposalMix:
         return ProposalMix(inject=self.inject, swap=self.swap)
+
+    def supply_policy(self) -> SupplyPolicy:
+        return SupplyPolicy(min_untried=self.supply_min_untried)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +369,7 @@ def run_loop(
     proposer: Proposer,
     engine: AudioGenerator,
     judge: AudioJudge,
+    supply: VocabSupply | None = None,
 ) -> None:
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.config.write_text(
@@ -356,6 +380,9 @@ def run_loop(
     target = state.round_index + config.rounds
     while state.round_index < target:
         run_round(config, paths, conn, proposer, engine, judge, state)
+        top_up_vocabulary(
+            [config.task], conn, supply, config.supply_policy(), state.round_index - 1
+        )
 
     all_rows: list[dict[str, Any]] = []
     for path in paths.all_scores():
@@ -379,13 +406,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-k", "--k", type=int, default=6)
     p.add_argument("--seed", type=int, default=0, help="seed for proposal sampling")
     p.add_argument("--screening-seed", type=int, default=0)
-    p.add_argument("--duration", type=float, default=DURATION_S)
+    p.add_argument(
+        "--duration",
+        type=float,
+        default=LOOP_DURATION_S,
+        help=f"clip length in seconds (Step 1 used {DURATION_S})",
+    )
     p.add_argument("--guidance-scale", type=float, default=GUIDANCE_SCALE)
     p.add_argument("--steps", type=int, default=NUM_INFERENCE_STEPS)
     p.add_argument("--inject", type=float, default=0.25)
     p.add_argument("--swap", type=float, default=0.25)
     p.add_argument("--min-j", type=float, default=0.5, help="-1 lists everything")
     p.add_argument("--proposer", choices=PROPOSERS, default="bandit")
+    p.add_argument("--supply", choices=SUPPLIES, default="llm")
+    p.add_argument("--supply-min-untried", type=int, default=8)
+    p.add_argument("--supply-draws", type=int, default=10)
     p.add_argument("--clusters", type=int, default=SearchConfig().clusters)
     p.add_argument("--eta", type=float, default=SearchConfig().eta)
     p.add_argument("--race-fraction", type=float, default=RacingConfig().fraction)
@@ -420,6 +455,9 @@ def main(argv: list[str] | None = None) -> None:
         min_j=None if args.min_j < 0 else args.min_j,
         proposer=args.proposer,
         search=search_cfg.to_dict(),
+        supply=args.supply,
+        supply_min_untried=args.supply_min_untried,
+        supply_draws=args.supply_draws,
         device=args.device,
     )
     conn = connect(args.runs_dir / VOCAB_FILENAME)
@@ -475,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:
             num_inference_steps=config.num_inference_steps,
         )
 
-    run_loop(config, paths, conn, proposer, engine, judge)
+    run_loop(config, paths, conn, proposer, engine, judge, build_supply(config, paths))
 
 
 if __name__ == "__main__":

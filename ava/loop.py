@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import torch
@@ -73,12 +73,14 @@ from ava.spec import (
     RunState,
     Verdict,
 )
+from ava.supply import SupplyPolicy, VocabSupply, replenish
 from ava.vocab import connect, seed_author_vocab
 
 DEFAULT_RUNS_DIR = Path("runs")
 VOCAB_FILENAME = "vocab.db"
 DEFAULT_TASKS = ("hybrid",)
 PROPOSERS = ("bandit", "evolve", "uniform")
+SUPPLIES = ("none", "llm")
 
 # Recorded in config.yaml, not adjustable: the search space is prompts only.
 VIEW_PARAMS: dict[str, float | int] = {
@@ -130,6 +132,12 @@ class LoopConfig:
     # Which search drives the rounds: the v1 component bandit, the v2
     # evolutionary search (`ava.search`), or a uniform validation sweep.
     proposer: str = "bandit"
+    # In-run vocabulary supply: `llm` samples new words from GPT-2 between
+    # rounds whenever a role's untried pool drops below `supply_min_untried`;
+    # `none` leaves the vocabulary as it was at the start.
+    supply: str = "none"
+    supply_min_untried: int = 8
+    supply_draws: int = 10
     # The evolutionary proposer's knobs, recorded whatever proposer runs so a
     # config file always says what a `--proposer evolve` run would have used.
     search: dict[str, Any] = field(default_factory=lambda: SearchConfig().to_dict())
@@ -138,6 +146,8 @@ class LoopConfig:
     )
 
     def __post_init__(self) -> None:
+        if self.supply not in SUPPLIES:
+            raise ValueError(f"supply must be one of {SUPPLIES}, got {self.supply}")
         if self.proposer not in PROPOSERS:
             raise ValueError(
                 f"proposer must be one of {PROPOSERS}, got {self.proposer}"
@@ -145,6 +155,9 @@ class LoopConfig:
 
     def mix(self) -> ProposalMix:
         return ProposalMix(inject=self.inject, swap=self.swap)
+
+    def supply_policy(self) -> SupplyPolicy:
+        return SupplyPolicy(min_untried=self.supply_min_untried)
 
     def search_config(self) -> SearchConfig:
         d = dict(self.search)
@@ -482,6 +495,20 @@ def harvest(
     return out_rows
 
 
+def top_up_vocabulary(
+    tasks: Sequence[str],
+    conn: sqlite3.Connection,
+    supply: VocabSupply | None,
+    policy: SupplyPolicy,
+    round_index: int,
+) -> None:
+    """After a round: ask the supply for words wherever the untried pool ran low."""
+    if supply is None:
+        return
+    for key, n in replenish(conn, tasks, supply, policy, round_index).items():
+        print(f"[vocab] round {round_index}: {key} was running low, +{n} new arms")
+
+
 def run_loop(
     config: LoopConfig,
     paths: RunPaths,
@@ -489,6 +516,7 @@ def run_loop(
     proposer: Proposer,
     engine: Generator,
     judge: Judge,
+    supply: VocabSupply | None = None,
 ) -> None:
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.config.write_text(
@@ -501,6 +529,9 @@ def run_loop(
     target = state.round_index + config.rounds
     while state.round_index < target:
         run_round(config, paths, conn, proposer, engine, judge, viewsets, state)
+        top_up_vocabulary(
+            config.tasks, conn, supply, config.supply_policy(), state.round_index - 1
+        )
 
     all_rows: list[dict[str, Any]] = []
     for path in paths.all_scores():
@@ -585,6 +616,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="alias for --proposer uniform",
     )
+    grow = p.add_argument_group("vocabulary", "growing the vocabulary during the run")
+    grow.add_argument(
+        "--supply",
+        choices=SUPPLIES,
+        default="llm",
+        help="llm: sample new words from GPT-2 (CPU) between rounds whenever a "
+        "role's untried pool runs low; none: keep the vocabulary fixed",
+    )
+    grow.add_argument(
+        "--supply-min-untried",
+        type=int,
+        default=8,
+        help="ask the supply when a (task, role) has fewer untried arms than this",
+    )
+    grow.add_argument(
+        "--supply-draws",
+        type=int,
+        default=10,
+        help="list continuations sampled per supply call",
+    )
     search = p.add_argument_group("evolve", "options for --proposer evolve")
     defaults = SearchConfig()
     search.add_argument(
@@ -657,6 +708,9 @@ def main(argv: list[str] | None = None) -> None:
         ref_prompt=args.ref_prompt,
         proposer=proposer_name,
         search=search_cfg.to_dict(),
+        supply=args.supply,
+        supply_min_untried=args.supply_min_untried,
+        supply_draws=args.supply_draws,
     )
 
     # The vocabulary database is shared across runs on purpose: the posteriors
@@ -721,7 +775,33 @@ def main(argv: list[str] | None = None) -> None:
             ref_prompt=config.ref_prompt,
         )
 
-    run_loop(config, paths, conn, proposer, engine, judge)
+    run_loop(config, paths, conn, proposer, engine, judge, build_supply(config, paths))
+
+
+class SupplySettings(Protocol):
+    """What build_supply reads; both loops' configs satisfy it."""
+
+    supply: str
+    supply_min_untried: int
+    supply_draws: int
+    seed: int
+
+
+def build_supply(config: SupplySettings, paths: RunPaths) -> VocabSupply | None:
+    """The GPT-2 supply, resident on the CPU, or None for `supply='none'`."""
+    if config.supply != "llm":
+        return None
+    from ava_vocab.generate_vocab import LlmSupply
+
+    print(
+        f"[vocab] supply=llm: new words whenever a role has fewer than "
+        f"{config.supply_min_untried} untried arms ({config.supply_draws} draws)"
+    )
+    return LlmSupply(
+        draws=config.supply_draws,
+        seed=config.seed,
+        log_path=paths.root.parent / "vocab_generation_log.jsonl",
+    )
 
 
 if __name__ == "__main__":
