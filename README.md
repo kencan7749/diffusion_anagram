@@ -80,16 +80,66 @@ Nothing is ever deleted on the score's say-so: every candidate is written to
 `scores.jsonl` with its full N×N matrix, so a threshold can be moved and the
 figures redrawn without regenerating an image.
 
+## Two searches
+
+`--proposer bandit` (v1, the default) treats a candidate as a sum of
+independent components: Thompson sampling over the `(word, task, role)`
+posteriors, a fixed quota of never-tried words, and targeted swaps of the slot
+that failed. Its limitation is that what works is the *pair*, and a component
+bandit cannot represent that.
+
+`--proposer evolve` (v2, `ava/search/`) searches over pairs while keeping the
+v1 posteriors as its knowledge layer:
+
+- **Archive (MAP-Elites).** One elite per cell, a cell being the task plus the
+  semantic cluster of each prompt (k-means over CLIP text embeddings of the
+  vocabulary, seeded and persisted as `clusters.npz`). Diversity is a property
+  of the archive, not a term in the objective. Everything ever evaluated stays
+  in `archive.jsonl`.
+- **Operators.** `swap_slot`, `crossover`, `restyle`, `transpose`,
+  `transfer_task` (same pair, another view) and `inject` (a never-tried word),
+  chosen by a UCB1 bandit rewarded by the child's improvement over its parent.
+  Replacement words come from the v1 posteriors.
+- **Duplicate rejection.** A child whose prompts are within cosine `eta` of an
+  evaluated pair of the same task and style is dropped before it costs a
+  generation. The distribution `eta` was applied to is recorded.
+- **Racing.** Each pair carries `Beta(held + 1, failed + 1)`; a share of every
+  round re-seeds the pairs whose lower quartile of success rate is still at or
+  above one half, up to `--max-seeds`. This replaces the fixed harvest.
+- **Surrogate.** A numpy Gaussian process over the embeddings, slot cosines,
+  task and posteriors ranks the children by UCB, but only while its
+  leave-one-out Spearman rho over recent rounds clears a threshold. Otherwise
+  it steps aside and selection is uniform; its predictions are recorded
+  either way, in `scores.jsonl` under `extra`.
+
+Nothing in `ava/search/` imports torch; embeddings are injected, and in a run
+they are the judge's own CLIP. A run is reproducible from its seed byte for
+byte (`archive.jsonl` included), and resumes from its persisted state.
+
+```bash
+.venv/bin/python -m ava.loop --run-id evo --tasks flip,hybrid,jigsaw --rounds 12 --k 8 \
+    --proposer evolve --harvest-seeds 0 --harvest-top 0
+scripts/run_ab_search.sh        # v1 vs v2 at equal budget -> results/stepB/ab.md
+```
+
+Whether v2 replaces v1 as the default is decided by measurement, not by the
+design: `scripts/ab_compare.py` applies the rule from
+`.claude/tasks/design_search_v2.md` (yield at least v1's, more cells held) to
+the two runs' files. See `results/stepB/` for the current numbers.
+
 ## Layout
 
 ```
 ava/          the pipeline
   spec.py       candidates, verdicts, run state, fixed view parameters
   metric.py     J = min(every view holds), shared by both tracks
+  rankstats.py  Spearman's rho and the ROC AUC, for checking predictions
   vocab.py      the (word, task, role) bandit arms and their Beta posteriors
-  propose.py    what to try next, and per-slot credit assignment
+  propose.py    what to try next (v1 bandit), and per-slot credit assignment
   report.py     contact sheet and component ranking
   loop.py       orchestration (CLI entry point)
+  search/       the v2 evolutionary proposer (archive, operators, novelty,
+                racing, surrogate, evolve); torch-free
   image/        the multi-view illusion track
     tasks.py      the task registry (pure data)
     views.py      builds the upstream view objects; perceptual views per task
@@ -136,3 +186,7 @@ Grow the vocabulary between runs:
 `-m slow` additionally runs the metric's regression test, which needs CUDA and
 the CLIP weights. `scripts/stepA_paper_examples.py` generates one paper example
 per task on the GPU and checks that each task's own view reads best.
+`scripts/stepB_fidelity.py` checks whether a cheaper generation (15 steps, or
+the 64 px stage) predicts whether the full one holds, and
+`scripts/run_ab_search.sh` runs the v1/v2 comparison; both write only under
+`results/stepB/`, and `scripts/render_stepB.py` draws from those files.
