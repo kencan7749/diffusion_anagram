@@ -103,9 +103,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = "==0.25.0" },
-    { name = "diffusers", specifier = "==0.24.0" },
+    { name = "diffusers", specifier = "==0.30.3" },
     { name = "einops", specifier = "==0.7.0" },
-    { name = "huggingface-hub", specifier = "==0.19.4" },
+    { name = "huggingface-hub", specifier = "==0.25.2" },
     { name = "imageio", specifier = "==2.33.0" },
     { name = "imageio-ffmpeg", specifier = "==0.4.9" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
@@ -154,7 +154,7 @@ wheels = [
 
 [[package]]
 name = "diffusers"
-version = "0.24.0"
+version = "0.30.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -166,9 +166,9 @@ dependencies = [
     { name = "requests" },
     { name = "safetensors" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/e0/4419f79ecc9c8006daad1969780b8e860e083c614611bced43dc1ec72fa4/diffusers-0.24.0.tar.gz", hash = "sha256:05dec2b46797b0a8037f621a16cdd6c11c8ccaf1bc1714e544c07f80341c9aa5", size = 1350753, upload-time = "2023-11-29T19:06:19.497Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/de/a9/a53a3d0c0a277a5002aa1e625d0e651b2957f901438052d8d47a97703883/diffusers-0.30.3.tar.gz", hash = "sha256:67c5eb25d5b50bf0742624ef43fe0f6d1e1604f64aad3e8558469cbe89ecf72f", size = 2113910, upload-time = "2024-09-17T05:40:43.853Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/92/b17949ff6b634bfb93e12ff8753288d6c59edf4366cc5c501377e6373e0c/diffusers-0.24.0-py3-none-any.whl", hash = "sha256:d4507c7cc273594319b052c342ef0dc268fdf9b59a5da3518c900a03c58f9188", size = 1764630, upload-time = "2023-11-29T19:06:16.162Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/1c/2ad4e336fe8d83865810f32717a6b38ece3e90c2acc441cfadb5ce950eda/diffusers-0.30.3-py3-none-any.whl", hash = "sha256:1b70209e4d2c61223b96a7e13bc4d70869c8b0b68f54a35ce3a67fcf813edeee", size = 2658350, upload-time = "2024-09-17T05:40:41.845Z" },
 ]
 
 [[package]]
@@ -200,7 +200,7 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "0.19.4"
+version = "0.25.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -211,9 +211,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/64/74/c85a5c59888da14c9904dad8109cf1c744055ffde38a8fb830a1e3cf1d66/huggingface_hub-0.19.4.tar.gz", hash = "sha256:176a4fc355a851c17550e7619488f383189727eab209534d7cef2114dae77b22", size = 270143, upload-time = "2023-11-16T16:16:44.972Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/fd/5f81bae67096c5ab50d29a0230b8374f0245916cca192f8ee2fada51f4f6/huggingface_hub-0.25.2.tar.gz", hash = "sha256:a1014ea111a5f40ccd23f7f7ba8ac46e20fa3b658ced1f86a00c75c06ec6423c", size = 365806, upload-time = "2024-10-09T08:32:41.565Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/09/1945ca6ba3ad8ad6e2872ba682ce8d68c5e63c8e55458ed8ab4885709f1d/huggingface_hub-0.19.4-py3-none-any.whl", hash = "sha256:dba013f779da16f14b606492828f3760600a1e1801432d09fe1c33e50b825bb5", size = 311673, upload-time = "2023-11-16T16:16:42.24Z" },
+    { url = "https://files.pythonhosted.org/packages/64/09/a535946bf2dc88e61341f39dc507530411bb3ea4eac493e5ec833e8f35bd/huggingface_hub-0.25.2-py3-none-any.whl", hash = "sha256:1897caf88ce7f97fe0110603d8f66ac264e3ba6accdf30cd66cc0fed5282ad25", size = 436575, upload-time = "2024-10-09T08:32:39.166Z" },
 ]
 
 [[package]]
