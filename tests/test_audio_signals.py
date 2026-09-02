@@ -78,3 +78,19 @@ def test_control_is_unchanged_in_every_way_reversal_could_change_it() -> None:
 
     # Samples really do change -- otherwise the control would be vacuous.
     assert not np.allclose(wave, reverse_view(wave))
+
+
+def test_rms_profile_splits_time_not_channels() -> None:
+    """A (channels, n) array must be downmixed, not split along its 2 channels.
+
+    Splitting the wrong axis gives two values and then NaN, which reads as a
+    measurement rather than failing.
+    """
+    loud_then_quiet = np.concatenate([np.ones(300), np.full(300, 0.01)])
+    stereo = np.stack([loud_then_quiet, loud_then_quiet])
+
+    profile = rms_profile(stereo, 6)
+    assert profile.shape == (6,)
+    assert not np.isnan(profile).any()
+    assert profile[0] > 10.0 * profile[-1]
+    assert np.allclose(profile, rms_profile(loud_then_quiet, 6))
