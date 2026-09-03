@@ -10,7 +10,13 @@ copying -- which is what makes it the cheapest possible anagram view. There is
 no parameter to tune and no inverse to derive.
 """
 
+from collections.abc import Callable
+
 import numpy as np
+from scipy.signal import butter, sosfiltfilt
+
+from ava.audio.permute import JIGSAW_BLOCKS, JIGSAW_PERM, JIGSAW_SEED, block_slices
+from ava.image.tasks import IllusionTask
 
 
 def forward_view(wave: np.ndarray) -> np.ndarray:
@@ -33,4 +39,92 @@ def reverse_view(wave: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(wave[..., ::-1])
 
 
-VIEWS = {"forward": forward_view, "reverse": reverse_view}
+# A view takes the signal and its sample rate: reversal ignores the rate, a
+# filter cannot.
+View = Callable[[np.ndarray, int], np.ndarray]
+
+LOWPASS_ORDER = 8
+
+
+def lowpass_view(cutoff_hz: float) -> View:
+    """The signal heard through a wall or from far away: a low-pass filter.
+
+    Butterworth of order 8, applied forwards and backwards so the phase is
+    unchanged and the envelope is not smeared in one direction -- a filter
+    with group delay would add a small time shift to exactly the axis the
+    reversal track is about. This is also the filter the latent projector
+    (`ava.audio.bands`) is fitted against, so the judge and the sampler mean
+    the same thing by "low".
+    """
+
+    def view(wave: np.ndarray, sample_rate: int) -> np.ndarray:
+        sos = butter(
+            LOWPASS_ORDER, cutoff_hz, btype="low", fs=sample_rate, output="sos"
+        )
+        return np.ascontiguousarray(sosfiltfilt(sos, wave, axis=-1))
+
+    return view
+
+
+def permute_view(perm: tuple[int, ...]) -> View:
+    """The recording cut into equal blocks and spliced in another order.
+
+    Hard cuts, no crossfade: the judge must hear what the latent view did,
+    and a crossfade would be a second, unmeasured operation. Position i of
+    the result is source block `perm[i]`, with the same remainder rule as
+    the latent side, so the two cut at the same instants when the waveform
+    is exactly the decoded span of the latent (which the engines return).
+    """
+
+    def view(wave: np.ndarray, sample_rate: int) -> np.ndarray:
+        slices = block_slices(wave.shape[-1], len(perm))
+        out = wave.copy()
+        for position, source in enumerate(perm):
+            out[..., slices[position]] = wave[..., slices[source]]
+        return out
+
+    return view
+
+
+# Parameters of the views that have any, for a run's config.yaml.
+VIEW_PARAMS: dict[str, dict[str, object]] = {
+    f"jigsaw_{JIGSAW_BLOCKS}": {
+        "blocks": JIGSAW_BLOCKS,
+        "seed": JIGSAW_SEED,
+        "perm": list(JIGSAW_PERM),
+    },
+}
+
+
+def _identity(wave: np.ndarray, sample_rate: int) -> np.ndarray:
+    return forward_view(wave)
+
+
+def _reversed(wave: np.ndarray, sample_rate: int) -> np.ndarray:
+    return reverse_view(wave)
+
+
+# Keyed by the names `IllusionTask.view_names` uses for audio tasks.
+VIEWS: dict[str, View] = {
+    "forward": _identity,
+    "reverse": _reversed,
+    "near": _identity,
+    "far_750": lowpass_view(750.0),
+    "whole": _identity,
+    f"jigsaw_{JIGSAW_BLOCKS}": permute_view(JIGSAW_PERM),
+}
+
+
+def views_of(task: IllusionTask) -> list[View]:
+    """The perceptual views of a task, in slot order."""
+    missing = [name for name in task.view_names if name not in VIEWS]
+    if missing:
+        raise KeyError(f"{task.name}: no audio view named {missing}")
+    return [VIEWS[name] for name in task.view_names]
+
+
+def perceive(
+    wave: np.ndarray, task: IllusionTask, sample_rate: int
+) -> list[np.ndarray]:
+    """What a listener hears of one signal under each of the task's views."""
+    return [view(wave, sample_rate) for view in views_of(task)]

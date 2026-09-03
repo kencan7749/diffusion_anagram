@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ava runs</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header id="top">
+    <a id="brand" href="#">ava</a>
+    <select id="run-select" aria-label="run"></select>
+    <span id="run-status"></span>
+    <nav id="tabs"></nav>
+    <label id="clips-toggle" hidden><input type="checkbox" checked> clips</label>
+    <span id="jobs"></span>
+    <span id="poll"></span>
+  </header>
+  <main id="main"></main>
+  <aside id="detail" hidden></aside>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

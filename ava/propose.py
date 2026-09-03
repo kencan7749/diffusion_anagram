@@ -1,14 +1,14 @@
-"""Proposer: decides which prompt triples to try next, and assigns credit.
+"""Proposer: decides which candidates to try next, and assigns credit.
 
-This is the core of the system. Sigma is fixed, so the prompt triple
-(low, high, style) is the entire search space.
+This is the core of the system. The view parameters are fixed, so a candidate
+is a task, one word per searched slot, and a style; that is the whole space.
 
-Credit assignment is per component, not per candidate. One evaluation of
-(low_i, high_j, style_k) yields evidence about three separate arms:
+Credit assignment is per component, not per candidate. One evaluation of a
+flip with words (w_1, w_2) in style s yields evidence about three arms:
 
-    p_far -> (low_i, 'low')     did it survive blurring?
-    p_near -> (high_j, 'high')  could it be read from fine detail?
-    J     -> (style_k, 'style') did the pair work at all in this style?
+    p_1 -> (w_1, 'flip', 'subject')    did view 1 read as its prompt?
+    p_2 -> (w_2, 'flip', 'subject')    did view 2?
+    J   -> (s,   'flip', 'style')      did the pair work at all in this style?
 
 A round of k candidates is split three ways rather than being pure Thompson
 sampling. Pure exploitation would converge onto the seed vocabulary and freeze
@@ -16,35 +16,30 @@ it; the fixed injection quota keeps new words entering at a bounded rate even
 once there are thousands of arms.
 
     ~50% exploit  Thompson sampling over the existing posteriors
-    ~25% inject   an arm that has never been tried, guaranteed
-    ~25% swap     last round's failures, resampling only the component that
+    ~25% inject   an arm that has never been tried, guaranteed; words that
+                  only other tasks know count as untried here
+    ~25% swap     last round's failures, resampling only the slots that
                   failed (keeping a working component is more sample-efficient
-                  than redrawing the whole triple)
+                  than redrawing the whole candidate)
 
-Role swapping needs no special case: (word, 'low') and (word, 'high') are
-independent arms, so Thompson sampling tries both on its own.
+Tasks are visited round-robin within a round, so every configured task gets
+its share of the budget; which task deserves more is a question for the search
+layer, not for this proposer.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any, Protocol
 
 import numpy as np
 
+from ava.image.tasks import STYLE, IllusionTask, get_task
 from ava.spec import CandidateSpec, RunState, Verdict
-from ava.vocab import (
-    ROLES,
-    Arm,
-    Role,
-    list_arms,
-    thompson_sample,
-    untried_arms,
-    update_arm,
-)
+from ava.vocab import Arm, draw_arm, ensure_arm, list_arms, untried_pool, update_arm
 
 # Origins recorded in candidates.jsonl so a round can be explained afterwards.
 EXPLOIT = "exploit"
@@ -80,9 +75,6 @@ class ProposalMix:
 DEFAULT_MIX = ProposalMix()
 
 
-DEFAULT_MIX = ProposalMix()
-
-
 @dataclass(frozen=True)
 class Proposal:
     """A candidate plus why it was proposed.
@@ -95,14 +87,17 @@ class Proposal:
     spec: CandidateSpec
     origin: str
     detail: str
+    # Machine-readable provenance (the operator that made it, the surrogate's
+    # prediction, ...). Written to candidates.jsonl and scores.jsonl so a
+    # search's decisions can be audited against what actually happened.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
-        from dataclasses import asdict
-
         return {
             "uid": self.spec.uid(),
             "origin": self.origin,
             "detail": self.detail,
+            "extra": dict(self.extra),
             "spec": asdict(self.spec),
         }
 
@@ -110,29 +105,46 @@ class Proposal:
 class Proposer(Protocol):
     def propose(self, state: RunState, k: int) -> list[Proposal]: ...
 
+    def observe(self, state: RunState) -> None:
+        """Called once per round, after `state.last_round` holds its results.
+
+        The bandit proposers read `state.last_round` lazily inside `propose`
+        and need nothing here; a proposer that keeps its own history (the
+        evolutionary one keeps an archive) folds the round in at this point,
+        so its persisted state is complete after the final round too.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Credit assignment
 # ---------------------------------------------------------------------------
 
 
-def spec_arms(spec: CandidateSpec) -> tuple[tuple[str, Role], ...]:
-    """The three arms a candidate draws on."""
-    return ((spec.prompt_low, "low"), (spec.prompt_high, "high"), (spec.style, "style"))
+def spec_arms(spec: CandidateSpec) -> tuple[tuple[str, str, str], ...]:
+    """The (word, task, role) arms a candidate draws on: searched slots, then style."""
+    task = get_task(spec.task)
+    arms = [
+        (spec.prompts[i], task.name, task.slots[i].role) for i in task.searched_slots()
+    ]
+    arms.append((spec.style, task.name, STYLE))
+    return tuple(arms)
 
 
 def assign_credit(
     conn: sqlite3.Connection, spec: CandidateSpec, verdict: Verdict
 ) -> None:
-    """Fold one evaluation into all three arms' posteriors.
+    """Fold one evaluation into every arm the candidate drew on.
 
     Each signal is routed to the component it actually speaks about. Giving
-    every arm the same J would make a good low word indistinguishable from the
-    bad high word it happened to be paired with.
+    every arm the same J would make a good word indistinguishable from the bad
+    word it happened to be paired with. The reference slot of an inverse
+    problem is not an arm and receives nothing.
     """
-    update_arm(conn, spec.prompt_low, "low", verdict.p_far)
-    update_arm(conn, spec.prompt_high, "high", verdict.p_near)
-    update_arm(conn, spec.style, "style", verdict.j)
+    task = get_task(spec.task)
+    for i in task.searched_slots():
+        update_arm(conn, spec.prompts[i], task.name, task.slots[i].role, verdict.p[i])
+    update_arm(conn, spec.style, task.name, STYLE, verdict.j)
 
 
 # ---------------------------------------------------------------------------
@@ -144,27 +156,112 @@ def _content_words(caption: str) -> frozenset[str]:
     return frozenset(re.findall(r"[a-z]+", caption.lower())) - _STOPWORDS
 
 
-def captions_collide(verdict: Verdict, threshold: float = 0.6) -> bool:
-    """True when both views appear to show the same subject.
+def colliding_views(verdict: Verdict, threshold: float = 0.6) -> tuple[int, int] | None:
+    """The first pair of views whose captions describe the same thing, if any.
 
-    A candidate can score well on both views and still be worthless: if one
-    object happens to match both prompts, there is no illusion, just an image.
-    The BLIP captions are used only as this boolean flag and never as a number,
+    A candidate can score well on every view and still be worthless: if one
+    object happens to match two prompts, there is no illusion, just an image.
+    The BLIP captions are used only for this boolean and never as a number,
     because CLIP's text-to-text similarity is too weak to trust quantitatively.
     """
-    far = _content_words(verdict.caption_far)
-    near = _content_words(verdict.caption_near)
-    if not far or not near:
-        return False
-    return len(far & near) / len(far | near) >= threshold
+    words = [_content_words(c) for c in verdict.captions]
+    for i in range(len(words)):
+        for j in range(i + 1, len(words)):
+            if not words[i] or not words[j]:
+                continue
+            if len(words[i] & words[j]) / len(words[i] | words[j]) >= threshold:
+                return i, j
+    return None
+
+
+def captions_collide(verdict: Verdict, threshold: float = 0.6) -> bool:
+    return colliding_views(verdict, threshold) is not None
 
 
 def diagnose(verdict: Verdict, collision_threshold: float = 0.6) -> str:
-    """Verdict.diagnose(), plus the both-views-show-the-same-thing case."""
+    """Verdict.diagnose(), plus the views-show-the-same-thing case."""
     base = verdict.diagnose()
     if base == "ok" and captions_collide(verdict, collision_threshold):
         return "views_collapsed"
     return base
+
+
+def repairable(diagnosis: str) -> bool:
+    return diagnosis == "views_collapsed" or diagnosis.startswith("lost:")
+
+
+# ---------------------------------------------------------------------------
+# Shared candidate assembly
+# ---------------------------------------------------------------------------
+
+
+class CandidateBuilder:
+    """What both proposers share: turning drawn words into a CandidateSpec."""
+
+    def __init__(
+        self,
+        tasks: Sequence[str],
+        screening_seed: int,
+        guidance_scale: float,
+        num_inference_steps: int,
+        ref_image: str | None,
+        ref_prompt: str | None,
+    ) -> None:
+        if not tasks:
+            raise ValueError("at least one task is required")
+        self.tasks: list[IllusionTask] = [get_task(t) for t in tasks]
+        for task in self.tasks:
+            if task.ref_slot is not None and (ref_image is None or ref_prompt is None):
+                raise ValueError(
+                    f"task {task.name!r} pins a slot to a reference image; "
+                    "pass ref_image and ref_prompt"
+                )
+        self.screening_seed = screening_seed
+        self.guidance_scale = guidance_scale
+        self.num_inference_steps = num_inference_steps
+        self.ref_image = ref_image
+        self.ref_prompt = ref_prompt
+        self._task_cursor = 0
+
+    def next_task(self) -> IllusionTask:
+        task = self.tasks[self._task_cursor % len(self.tasks)]
+        self._task_cursor += 1
+        return task
+
+    def reserved(self, task: IllusionTask) -> frozenset[str]:
+        """Words no searched slot may take: the reference prompt of an inverse task.
+
+        With the vocabulary pooled across tasks the reference subject is
+        drawable like any other word, and a candidate whose free slot repeats
+        the reference is not an illusion.
+        """
+        if task.ref_slot is not None and self.ref_prompt is not None:
+            return frozenset({self.ref_prompt})
+        return frozenset()
+
+    def build(
+        self, task: IllusionTask, words: dict[int, str], style: str
+    ) -> CandidateSpec:
+        prompts = []
+        for i in range(task.n_views):
+            if i == task.ref_slot:
+                assert self.ref_prompt is not None
+                prompts.append(self.ref_prompt)
+            else:
+                prompts.append(words[i])
+        return CandidateSpec(
+            task=task.name,
+            prompts=tuple(prompts),
+            style=style,
+            seed=self.screening_seed,
+            guidance_scale=self.guidance_scale,
+            num_inference_steps=self.num_inference_steps,
+            ref_image=self.ref_image if task.ref_slot is not None else None,
+        )
+
+
+def _words_of(spec: CandidateSpec, task: IllusionTask) -> dict[int, str]:
+    return {i: spec.prompts[i] for i in task.searched_slots()}
 
 
 # ---------------------------------------------------------------------------
@@ -173,24 +270,27 @@ def diagnose(verdict: Verdict, collision_threshold: float = 0.6) -> str:
 
 
 class BanditProposer:
-    """Thompson sampling over (word, role) arms, with injection and swaps.
+    """Thompson sampling over (word, task, role) arms, with injection and swaps.
 
     Dependencies are injected: the database connection, the RNG (so a run is
     reproducible from its seed) and, optionally, a semantic distance over
     prompt strings used to push apart components that collapsed onto the same
     subject. Without that callable the collapsed case falls back to redrawing
-    both components, which is correct but less directed.
+    the offending slot, which is correct but less directed.
     """
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         rng: np.random.Generator,
+        tasks: Sequence[str] = ("hybrid",),
         mix: ProposalMix | None = None,
         screening_seed: int = 0,
         guidance_scale: float = 10.0,
         num_inference_steps: int = 30,
         text_distance: Callable[[str, str], float] | None = None,
+        ref_image: str | None = None,
+        ref_prompt: str | None = None,
     ) -> None:
         self.conn = conn
         self.rng = rng
@@ -199,25 +299,40 @@ class BanditProposer:
         # fixed means a difference between two candidates is a difference
         # between prompts, not between noise draws. Seed luck is dealt with at
         # harvest time, where the survivors are regenerated across many seeds.
-        self.screening_seed = screening_seed
-        self.guidance_scale = guidance_scale
-        self.num_inference_steps = num_inference_steps
+        self.builder = CandidateBuilder(
+            tasks,
+            screening_seed,
+            guidance_scale,
+            num_inference_steps,
+            ref_image,
+            ref_prompt,
+        )
         self.text_distance = text_distance
+
+    @property
+    def tasks(self) -> list[IllusionTask]:
+        return self.builder.tasks
+
+    def observe(self, state: RunState) -> None:
+        """Nothing to fold in: swaps read `state.last_round` at proposal time."""
 
     # -- helpers ---------------------------------------------------------
 
-    def _build(self, low: str, high: str, style: str) -> CandidateSpec:
-        return CandidateSpec(
-            prompt_low=low,
-            prompt_high=high,
-            style=style,
-            seed=self.screening_seed,
-            guidance_scale=self.guidance_scale,
-            num_inference_steps=self.num_inference_steps,
-        )
+    def _draw(
+        self, task: IllusionTask, role: str, exclude: frozenset[str] = frozenset()
+    ) -> Arm:
+        # Over the pooled vocabulary: every task can try every word.
+        return draw_arm(self.conn, task.name, role, self.rng, exclude=exclude)
 
-    def _draw(self, role: Role, exclude: frozenset[str] = frozenset()) -> Arm:
-        return thompson_sample(self.conn, role, self.rng, exclude=exclude)
+    def _fill(self, task: IllusionTask, fixed: dict[int, str]) -> dict[int, str]:
+        """Draw a word for every searched slot not already fixed, all distinct."""
+        words = dict(fixed)
+        for i in task.searched_slots():
+            if i in words:
+                continue
+            taken = frozenset(words.values()) | self.builder.reserved(task)
+            words[i] = self._draw(task, task.slots[i].role, exclude=taken).word
+        return words
 
     def _accept(self, spec: CandidateSpec, seen: set[str], state: RunState) -> bool:
         uid = spec.uid()
@@ -226,92 +341,98 @@ class BanditProposer:
         seen.add(uid)
         return True
 
-    def _distant_alternative(self, role: Role, avoid: str) -> str:
-        """Pick a component semantically far from `avoid`.
+    def _distant_alternative(self, task: IllusionTask, role: str, avoid: str) -> str:
+        """Pick a word for `role` semantically far from `avoid`.
 
-        Used when both views collapsed onto one subject. Falls back to plain
+        Used when two views collapsed onto one subject. Falls back to plain
         Thompson sampling when no distance function was supplied.
         """
         distance = self.text_distance
+        exclude = frozenset({avoid}) | self.builder.reserved(task)
         if distance is None:
-            return self._draw(role, exclude=frozenset({avoid})).word
-        candidates = [
-            self._draw(role, exclude=frozenset({avoid})).word for _ in range(8)
-        ]
+            return self._draw(task, role, exclude=exclude).word
+        candidates = [self._draw(task, role, exclude=exclude).word for _ in range(8)]
         return max(candidates, key=lambda w: distance(avoid, w))
 
     # -- the three proposal kinds ---------------------------------------
 
     def _exploit_one(self) -> tuple[CandidateSpec, str]:
-        low = self._draw("low")
-        high = self._draw("high", exclude=frozenset({low.word}))
-        style = self._draw("style")
-        detail = (
-            f"thompson low={low.word!r}(n={low.n_trials}) "
-            f"high={high.word!r}(n={high.n_trials}) style={style.word!r}"
+        task = self.builder.next_task()
+        words = self._fill(task, {})
+        style = self._draw(task, STYLE)
+        detail = f"thompson task={task.name} " + " ".join(
+            f"{task.slots[i].name}={words[i]!r}" for i in sorted(words)
         )
-        return self._build(low.word, high.word, style.word), detail
+        return self.builder.build(
+            task, words, style.word
+        ), detail + f" style={style.word!r}"
 
     def _inject_one(
-        self, pool: dict[Role, list[Arm]]
+        self, pool: dict[tuple[str, str], list[Arm]]
     ) -> tuple[CandidateSpec, str] | None:
         """Build a candidate around an arm that has never been tried.
 
-        Roles with untried arms are chosen at random so injection does not
-        starve one role while another has a long backlog.
+        (task, role) pairs with untried arms are chosen at random so injection
+        does not starve one while another has a long backlog.
         """
-        roles: list[Role] = [r for r in ROLES if pool[r]]
-        if not roles:
+        keys = [k for k, arms in pool.items() if arms]
+        if not keys:
             return None
-        role: Role = roles[int(self.rng.integers(len(roles)))]
-        arm = pool[role].pop(int(self.rng.integers(len(pool[role]))))
+        task_name, role = keys[int(self.rng.integers(len(keys)))]
+        arms = pool[(task_name, role)]
+        arm = arms.pop(int(self.rng.integers(len(arms))))
+        ensure_arm(self.conn, arm)  # a word from another task becomes an arm here
+        task = get_task(task_name)
 
-        if role == "low":
-            spec = self._build(
-                arm.word,
-                self._draw("high", exclude=frozenset({arm.word})).word,
-                self._draw("style").word,
-            )
-        elif role == "high":
-            spec = self._build(
-                self._draw("low", exclude=frozenset({arm.word})).word,
-                arm.word,
-                self._draw("style").word,
-            )
+        if role == STYLE:
+            spec = self.builder.build(task, self._fill(task, {}), arm.word)
         else:
-            low = self._draw("low")
-            spec = self._build(
-                low.word,
-                self._draw("high", exclude=frozenset({low.word})).word,
-                arm.word,
-            )
-        return spec, f"inject untried ({arm.word!r}, {role!r}) source={arm.source}"
+            slot = next(i for i in task.searched_slots() if task.slots[i].role == role)
+            words = self._fill(task, {slot: arm.word})
+            spec = self.builder.build(task, words, self._draw(task, STYLE).word)
+        detail = (
+            f"inject untried ({arm.word!r}, {task.name}, {role}) source={arm.source}"
+        )
+        return spec, detail
 
     def _swap_one(
         self, spec: CandidateSpec, verdict: Verdict
     ) -> tuple[CandidateSpec, str] | None:
-        """Redraw only the component the diagnosis blames."""
+        """Redraw only the slots the diagnosis blames."""
+        task = get_task(spec.task)
         d = diagnose(verdict)
-        if d == "low_loses":
-            new = self._draw("low", exclude=frozenset({spec.prompt_low})).word
-            return (
-                self._build(new, spec.prompt_high, spec.style),
-                f"swap low {spec.prompt_low!r}->{new!r} (p_far={verdict.p_far:.3f})",
+        words = _words_of(spec, task)
+
+        if d.startswith("lost:"):
+            lost = set(d.removeprefix("lost:").split(","))
+            redraw = [i for i in task.searched_slots() if task.slots[i].name in lost]
+            if not redraw:  # only the reference slot failed; nothing to redraw
+                return None
+            kept = {i: w for i, w in words.items() if i not in redraw}
+            new = self._fill(task, kept)
+            changed = ", ".join(
+                f"{task.slots[i].name} {words[i]!r}->{new[i]!r} (p={verdict.p[i]:.3f})"
+                for i in redraw
             )
-        if d == "high_absent":
-            new = self._draw("high", exclude=frozenset({spec.prompt_high})).word
-            return (
-                self._build(spec.prompt_low, new, spec.style),
-                f"swap high {spec.prompt_high!r}->{new!r} "
-                f"(p_near={verdict.p_near:.3f})",
-            )
+            return self.builder.build(task, new, spec.style), f"swap {changed}"
+
         if d == "views_collapsed":
-            new = self._distant_alternative("high", spec.prompt_high)
+            pair = colliding_views(verdict)
+            assert pair is not None
+            i, j = pair
+            if j not in words:  # the later view is the reference slot; redraw the other
+                i, j = j, i
+            if j not in words:
+                return None
+            replacement = self._distant_alternative(task, task.slots[j].role, words[i])
+            new = dict(words)
+            new[j] = replacement
             return (
-                self._build(spec.prompt_low, new, spec.style),
-                f"swap high {spec.prompt_high!r}->{new!r} (both views read alike)",
+                self.builder.build(task, new, spec.style),
+                f"swap {task.slots[j].name} {words[j]!r}->{replacement!r} "
+                "(both views read alike)",
             )
-        # 'pair_mismatch' discards the triple outright; 'ok' needs no repair.
+        # 'all_lost' discards the candidate outright; 'ok' needs no repair.
         return None
 
     # -- entry point -----------------------------------------------------
@@ -325,7 +446,15 @@ class BanditProposer:
 
         # Injection first: it is the quota most easily crowded out, and any
         # shortfall should be absorbed by exploitation rather than the reverse.
-        pool: dict[Role, list[Arm]] = {r: untried_arms(self.conn, r) for r in ROLES}
+        pool: dict[tuple[str, str], list[Arm]] = {}
+        for task in self.tasks:
+            roles = {task.slots[i].role for i in task.searched_slots()} | {STYLE}
+            for role in sorted(roles):
+                pool[(task.name, role)] = [
+                    a
+                    for a in untried_pool(self.conn, task.name, role)
+                    if a.word not in self.builder.reserved(task)
+                ]
         for _ in range(n_inject):
             for _ in range(MAX_DRAW_ATTEMPTS):
                 built = self._inject_one(pool)
@@ -336,12 +465,8 @@ class BanditProposer:
                     out.append(Proposal(spec, INJECT, detail))
                     break
 
-        repairable = [
-            (s, v)
-            for s, v in state.last_round
-            if diagnose(v) in ("low_loses", "high_absent", "views_collapsed")
-        ]
-        for spec_prev, verdict in repairable[:n_swap]:
+        fixable = [(s, v) for s, v in state.last_round if repairable(diagnose(v))]
+        for spec_prev, verdict in fixable[:n_swap]:
             for _ in range(MAX_DRAW_ATTEMPTS):
                 built = self._swap_one(spec_prev, verdict)
                 if built is None:
@@ -387,34 +512,59 @@ class UniformProposer:
         self,
         conn: sqlite3.Connection,
         rng: np.random.Generator,
+        tasks: Sequence[str] = ("hybrid",),
         screening_seed: int = 0,
         guidance_scale: float = 10.0,
         num_inference_steps: int = 30,
-        roles_to_balance: tuple[Role, ...] = ("style",),
+        roles_to_balance: tuple[str, ...] = (STYLE,),
+        ref_image: str | None = None,
+        ref_prompt: str | None = None,
     ) -> None:
         self.conn = conn
         self.rng = rng
-        self.screening_seed = screening_seed
-        self.guidance_scale = guidance_scale
-        self.num_inference_steps = num_inference_steps
+        self.builder = CandidateBuilder(
+            tasks,
+            screening_seed,
+            guidance_scale,
+            num_inference_steps,
+            ref_image,
+            ref_prompt,
+        )
         # Round-robin over these roles so their arms get equal n, rather than
         # merely equal sampling probability, which at n=40 is not the same thing.
         self.roles_to_balance = roles_to_balance
-        self._cursor = 0
+        self._cursor: dict[tuple[str, str], int] = {}
 
-    def _pick(self, role: Role, exclude: frozenset[str] = frozenset()) -> str:
-        arms = [a for a in list_arms(self.conn, role) if a.word not in exclude]
+    def observe(self, state: RunState) -> None:
+        """A uniform sweep learns nothing from results, by design."""
+
+    def _pick(
+        self, task: IllusionTask, role: str, exclude: frozenset[str] = frozenset()
+    ) -> str:
+        arms = [
+            a for a in list_arms(self.conn, task.name, role) if a.word not in exclude
+        ]
         if not arms:
-            raise LookupError(f"no available arms for role {role!r}")
+            raise LookupError(f"no available arms for ({task.name!r}, {role!r})")
         return arms[int(self.rng.integers(len(arms)))].word
 
-    def _balanced(self, role: Role) -> str:
+    def _balanced(self, task: IllusionTask, role: str) -> str:
         """Cycle through a role's arms so every one is measured equally often."""
-        arms = sorted(list_arms(self.conn, role), key=lambda a: a.word)
+        arms = sorted(list_arms(self.conn, task.name, role), key=lambda a: a.word)
         if not arms:
-            raise LookupError(f"no available arms for role {role!r}")
-        word = arms[self._cursor % len(arms)].word
-        return word
+            raise LookupError(f"no available arms for ({task.name!r}, {role!r})")
+        cursor = self._cursor.get((task.name, role), 0)
+        return arms[cursor % len(arms)].word
+
+    def _advance(self, task: IllusionTask) -> None:
+        for role in self.roles_to_balance:
+            key = (task.name, role)
+            self._cursor[key] = self._cursor.get(key, 0) + 1
+
+    def _choose(self, task: IllusionTask, role: str, exclude: frozenset[str]) -> str:
+        if role in self.roles_to_balance:
+            return self._balanced(task, role)
+        return self._pick(task, role, exclude)
 
     def propose(self, state: RunState, k: int) -> list[Proposal]:
         if k <= 0:
@@ -422,34 +572,23 @@ class UniformProposer:
         seen: set[str] = set()
         out: list[Proposal] = []
         while len(out) < k:
+            task = self.builder.next_task()
             for _ in range(MAX_DRAW_ATTEMPTS):
-                low = self._pick("low")
-                high = self._pick("high", exclude=frozenset({low}))
-                style = (
-                    self._balanced("style")
-                    if "style" in self.roles_to_balance
-                    else self._pick("style")
-                )
-                spec = CandidateSpec(
-                    prompt_low=low,
-                    prompt_high=high,
-                    style=style,
-                    seed=self.screening_seed,
-                    guidance_scale=self.guidance_scale,
-                    num_inference_steps=self.num_inference_steps,
-                )
+                words: dict[int, str] = {}
+                for i in task.searched_slots():
+                    taken = frozenset(words.values()) | self.builder.reserved(task)
+                    words[i] = self._choose(task, task.slots[i].role, taken)
+                style = self._choose(task, STYLE, frozenset())
+                spec = self.builder.build(task, words, style)
                 uid = spec.uid()
                 if uid in seen or uid in state.evaluated_uids:
                     continue
                 seen.add(uid)
-                self._cursor += 1
-                out.append(
-                    Proposal(
-                        spec,
-                        UNIFORM,
-                        f"uniform low={low!r} high={high!r} style={style!r}",
-                    )
+                self._advance(task)
+                detail = f"uniform task={task.name} " + " ".join(
+                    f"{task.slots[i].name}={words[i]!r}" for i in sorted(words)
                 )
+                out.append(Proposal(spec, UNIFORM, f"{detail} style={style!r}"))
                 break
             else:
                 break

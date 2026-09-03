@@ -53,10 +53,10 @@ def build_sheet(rows: list[dict[str, Any]], out: Path) -> Path:
     f_body = get_font(12)
     f_small = get_font(11)
 
-    prompts = rows[0]
+    low_prompt, high_prompt = rows[0]["prompts"]
     draw.text(
         (PAD, 6),
-        f"low={prompts['prompt_low']}   high={prompts['prompt_high']}",
+        f"low={low_prompt}   high={high_prompt}",
         font=f_small,
         fill=MUTED,
     )
@@ -85,7 +85,7 @@ def build_sheet(rows: list[dict[str, Any]], out: Path) -> Path:
         sheet.paste(near, (LEFT, y))
         draw.text(
             (LEFT, y + CELL + 4),
-            f"caption: {str(any_row['caption_near'])[:34]}",
+            f"caption: {str(any_row['captions'][1])[:34]}",
             font=f_small,
             fill=MUTED,
         )
@@ -100,13 +100,13 @@ def build_sheet(rows: list[dict[str, Any]], out: Path) -> Path:
             draw.text(
                 (x, y + CELL + 4),
                 f"J={float(r['j']):.3f}  {r['diagnosis']}\n"
-                f"p_far={float(r['p_far']):.3f} p_near={float(r['p_near']):.3f}",
+                f"p_low={float(r['p'][0]):.3f} p_high={float(r['p'][1]):.3f}",
                 font=f_body,
                 fill=FG,
             )
             draw.text(
                 (x, y + CELL + 40),
-                f"caption: {str(r['caption_far'])[:34]}",
+                f"caption: {str(r['captions'][0])[:34]}",
                 font=f_small,
                 fill=MUTED,
             )

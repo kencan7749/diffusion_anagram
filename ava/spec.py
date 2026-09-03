@@ -1,48 +1,90 @@
 """Data structures for search candidates and their evaluation results.
 
-sigma / kernel_size are module constants rather than CandidateSpec fields.
-Phase 1 does not search over them, and keeping them out of the spec states
-that fact in code.
+A candidate names an illusion task (which views the image must satisfy), one
+prompt per view, and a style. The view parameters below are module constants
+rather than CandidateSpec fields: nothing searches over them, and keeping them
+out of the spec states that fact in code. They are the upstream defaults from
+dev/visual_anagrams, which are also the values the papers report.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 
-# Values passed to HybridLowPassView / HybridHighPassView.
-# Both views must receive the same value, otherwise lp(e1) + hp(e2) is not an
+# Hybrid images (Factorized Diffusion Sec. 3.4): Gaussian blur at the 64 px
+# stage; both views must receive the same value or lp(e1) + hp(e2) is not an
 # identity decomposition.
 SIGMA = 2.0
 KERNEL_SIZE = 33
 
-# Required by Factorized Diffusion. Distinct from Visual Anagrams' 'mean'.
-REDUCTION = "sum"
+# Triple hybrids: a two-level Laplacian pyramid. Upstream defaults; the paper
+# reports sigma_1 in [0.8, 1.0] and sigma_2 in [1.2, 2.0] (App. A.3).
+TRIPLE_SIGMA_1 = 1.0
+TRIPLE_SIGMA_2 = 2.0
+TRIPLE_KERNEL_SIZE = 25
+
+# Motion hybrids: diagonal line kernel, 7 px at 64 px, which the upstream code
+# scales to the paper's 29 px at 256 px.
+MOTION_SIZE = 7
+
+# Visual Anagrams views with parameters.
+SKEW_FACTOR = 1.5
+PATCH_GRID = 8  # patch_permute: 8x8 patches
+PIXEL_GRID = 64  # pixel_permute: every pixel of the 64 px stage
+JIGSAW_SEED = 4522  # upstream's fixed jigsaw permutation
+
+
+def apply_style(style: str, prompt: str) -> str:
+    """Combine a style with a subject.
+
+    A style containing `{}` is a template (`"oil painting style, {}"`, as the
+    Factorized Diffusion figures write it); anything else is a prefix, assembled
+    exactly as generate.py does with `f'{args.style} {p}'.strip()`.
+    """
+    if "{}" in style:
+        return style.replace("{}", prompt).strip()
+    return f"{style} {prompt}".strip()
 
 
 @dataclass(frozen=True)
 class CandidateSpec:
-    """A single point in the search space."""
+    """A single point in the search space.
 
-    prompt_low: str  # seen from far away (blurred)
-    prompt_high: str  # seen up close
-    style: str = ""  # prepended to both prompts
+    `prompts` is ordered to match the task's views. `ref_image` is only set for
+    inverse problems, where one view is pinned to a reference image; the prompt
+    in that slot then describes the reference for the judge and is not fed to
+    the generator.
+    """
+
+    task: str
+    prompts: tuple[str, ...]
+    style: str = ""  # prepended to (or wrapped around) every prompt
     seed: int = 0
     guidance_scale: float = 10.0
     num_inference_steps: int = 30
+    ref_image: str | None = None
+
+    def __post_init__(self) -> None:
+        # JSON round-trips deliver a list; the uid must not depend on that.
+        object.__setattr__(self, "prompts", tuple(self.prompts))
+        if len(self.prompts) < 2:
+            raise ValueError(
+                f"an illusion needs at least two prompts, got {self.prompts}"
+            )
 
     @property
-    def full_low(self) -> str:
-        # Same assembly as generate.py's f'{args.style} {p}'.strip()
-        return f"{self.style} {self.prompt_low}".strip()
+    def n_views(self) -> int:
+        return len(self.prompts)
+
+    def full_prompt(self, index: int) -> str:
+        return apply_style(self.style, self.prompts[index])
 
     @property
-    def full_high(self) -> str:
-        return f"{self.style} {self.prompt_high}".strip()
-
-    @property
-    def prompts(self) -> list[str]:
-        """Ordered to match the views (low_pass, high_pass)."""
-        return [self.full_low, self.full_high]
+    def full_prompts(self) -> list[str]:
+        """Ordered to match the views."""
+        return [self.full_prompt(i) for i in range(self.n_views)]
 
     def uid(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)
@@ -58,69 +100,80 @@ class Verdict:
     """
 
     uid: str
-    # CLIP score matrix S[view][prompt]; both axes ordered (low, high)
-    s_far_low: float
-    s_far_high: float
-    s_near_low: float
-    s_near_high: float
-    # Probability that each view picks its own prompt (chance level 0.5)
-    p_far: float
-    p_near: float
-    # Illusion score. min, not sum: an illusion only holds if both views hold.
+    task: str
+    slots: list[str]
+    # CLIP score matrix S[view][prompt]; both axes in slot order.
+    scores: list[list[float]]
+    # Probability that each view picks its own prompt among the N prompts.
+    p: list[float]
+    # Illusion score. min, not mean: an illusion only holds if every view holds.
     j: float
+    # The two scores the Visual Anagrams paper reports: min of the diagonal, and
+    # the both-directions softmax trace (Eq. 9).
+    alignment: float
+    concealment: float
     # Never used as a numeric signal. Kept as report evidence and as future
-    # VLM input.
-    caption_far: str = ""
-    caption_near: str = ""
+    # VLM input. One caption per view.
+    captions: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
 
     @property
-    def sep_far(self) -> float:
-        """Margin in the far view. Negative means the low-frequency side lost."""
-        return self.s_far_low - self.s_far_high
+    def n_views(self) -> int:
+        return len(self.slots)
 
     @property
-    def sep_near(self) -> float:
-        """Margin in the near view. Negative means the high-frequency side is absent."""
-        return self.s_near_high - self.s_near_low
+    def sep(self) -> list[float]:
+        """Raw CLIP margin per view: its own prompt minus the best other prompt.
+
+        Negative means the view read as some other prompt. For two views these
+        are the old `sep_far` and `sep_near`.
+        """
+        out = []
+        for i, row in enumerate(self.scores):
+            others = [s for j, s in enumerate(row) if j != i]
+            out.append(row[i] - max(others))
+        return out
 
     @property
     def sep_min(self) -> float:
-        """Ranking key: the weaker of the two raw CLIP margins.
+        """Ranking key: the weakest view's raw margin.
 
-        Same logic as J -- an illusion is only as good as its weaker view --
-        but on the cosine margins instead of the probabilities.
-
-        This does NOT reorder anything. A two-way softmax is a sigmoid of the
-        margin, and both views share CLIP's logit_scale, so
-        J == sigmoid(logit_scale * sep_min) exactly; the two induce the same
-        ranking. What changes is resolution. In a 40-candidate sweep the top 13
-        printed as J >= 0.99 while their margins spanned +0.048 to +0.114 -- a
-        2.4x range compressed past the third decimal. Beyond a margin of about
-        0.37 the sigmoid reaches 1.0 in float64 and the ties become real.
-
-        So: J decides pass/fail, where saturation is harmless. This carries the
-        order, where saturation costs first legibility and eventually the signal.
+        With two views a two-way softmax is a sigmoid of the margin, so
+        `J == sigmoid(logit_scale * sep_min)` exactly and the two orderings
+        agree; the margin is simply legible where J has saturated at 0.99. With
+        three or more views the two orderings can differ, because J looks at
+        the full softmax over N prompts while this looks at the runner-up only.
+        J still decides pass/fail; this carries the order.
         """
-        return min(self.sep_far, self.sep_near)
+        return min(self.sep)
+
+    @property
+    def holds(self) -> list[bool]:
+        """Per view: did it read as its own prompt? (argmax == diagonal)"""
+        return [s > 0.0 for s in self.sep]
+
+    def lost_slots(self) -> list[str]:
+        return [slot for slot, ok in zip(self.slots, self.holds, strict=True) if not ok]
 
     def diagnose(self) -> str:
-        """Failure mode, used by propose.py's targeted swap and by the report."""
-        lo_ok = self.p_far > 0.5
-        hi_ok = self.p_near > 0.5
-        if lo_ok and hi_ok:
+        """Failure mode, used by propose.py's targeted swap and by the report.
+
+        `ok`          every view reads as its prompt
+        `all_lost`    no view does; discard the whole candidate
+        `lost:a,b`    the named slots failed; resample only those
+        """
+        lost = self.lost_slots()
+        if not lost:
             return "ok"
-        if not lo_ok and not hi_ok:
-            return "pair_mismatch"  # discard the whole triple
-        if not lo_ok:
-            return "low_loses"  # resample prompt_low only
-        return "high_absent"  # resample prompt_high only
+        if len(lost) == self.n_views:
+            return "all_lost"
+        return "lost:" + ",".join(lost)
 
     def to_json(self) -> str:
         d = asdict(self)
-        d["sep_far"] = self.sep_far
-        d["sep_near"] = self.sep_near
+        d["sep"] = self.sep
         d["sep_min"] = self.sep_min
+        d["holds"] = self.holds
         d["diagnosis"] = self.diagnose()
         return json.dumps(d, ensure_ascii=False)
 
@@ -162,7 +215,7 @@ class RunState:
         )
 
     @classmethod
-    def from_json(cls, payload: str) -> "RunState":
+    def from_json(cls, payload: str) -> RunState:
         d = json.loads(payload)
         return cls(
             run_id=d["run_id"],

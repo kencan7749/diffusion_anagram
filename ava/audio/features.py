@@ -102,8 +102,10 @@ def spectral_centroid_halves(wave: np.ndarray, sample_rate: int) -> tuple[float,
     Two numbers rather than a full trajectory because that is all the question
     needs: whether the spectrum goes somewhere, and which way.
     """
+    # Split time, not channels: on (channels, n) the first axis is channels,
+    # and on mono (1, n) splitting it leaves an empty second half.
     centroids: list[float] = []
-    for chunk in np.array_split(wave, 2):
+    for chunk in np.array_split(to_mono(wave), 2):
         spectrum = np.abs(np.fft.rfft(chunk * np.hanning(chunk.size)))
         freqs = np.fft.rfftfreq(chunk.size, 1.0 / sample_rate)
         total = float(spectrum.sum())

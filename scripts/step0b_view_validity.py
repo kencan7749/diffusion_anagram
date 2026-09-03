@@ -36,7 +36,14 @@ once a control pinned what 'unchanged' looked like.
 It separates the two ways this can fail: the encoder not being equivariant,
 versus the decoder undoing it.
 
-    .venv/bin/python -m scripts.step0b_view_validity
+    .venv/bin/python -m scripts.step0b_view_validity                    # Stable Audio
+    .venv/bin/python -m scripts.step0b_view_validity --codec audioldm2   # AudioLDM 2
+
+The two codecs are not expected to behave alike. Stable Audio's is a stack of
+1D convolutions on the waveform, and the flip only approximates reversal
+there. AudioLDM 2's works on a log-mel spectrogram, where reversal is exact up
+to the frame grid (`ava.audio.mel`), so what it measures is only how far the
+2D VAE is from commuting with a flip.
 """
 
 from __future__ import annotations
@@ -49,9 +56,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from ava.audio.codec import LatentCodec, StableAudioCodec
+from ava.audio.codec import CODECS, LatentCodec
+from ava.audio.engine import LATENT_VIEWS, LatentView
 from ava.audio.features import log_mel_distance
-from ava.audio.perceive import reverse_view
+from ava.audio.perceive import VIEWS, reverse_view
+from ava.audio.resample import resample
 from ava.audio.signals import percussive_burst, rising_chirp, symmetric_burst
 from ava.audio.wavfile import write_wav
 
@@ -71,11 +80,13 @@ def probe_signals(sample_rate: int) -> dict[str, np.ndarray]:
     }
 
 
-def load_generated(directory: Path) -> dict[str, np.ndarray]:
-    """Clips written by scripts.smoke_stable_audio, if they are there.
+def load_generated(directory: Path, sample_rate: int) -> dict[str, np.ndarray]:
+    """Clips written by a smoke script, if they are there, at the codec's rate.
 
     In-distribution audio matters: a codec asked to reconstruct a synthetic
-    chirp is being asked something it was never trained for.
+    chirp is being asked something it was never trained for. The clips come
+    from whichever generator made them and are resampled here, so Stable
+    Audio's 44.1 kHz output can also probe AudioLDM 2's 16 kHz codec.
     """
     manifest = directory / "run.json"
     if not manifest.is_file():
@@ -87,22 +98,47 @@ def load_generated(directory: Path) -> dict[str, np.ndarray]:
     for index, clip in enumerate(json.loads(manifest.read_text())["clips"]):
         with wave_module.open(clip["path"], "rb") as handle:
             channels = handle.getnchannels()
+            rate = handle.getframerate()
             raw = handle.readframes(handle.getnframes())
         data = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32767.0
-        out[f"generated_{index:02d}"] = data.reshape(-1, channels).T
+        clip_wave = data.reshape(-1, channels).T
+        out[f"generated_{index:02d}"] = resample(clip_wave, rate, sample_rate)
     return out
 
 
+def apply_latent_view(
+    codec: LatentCodec, view: LatentView, latent: torch.Tensor
+) -> torch.Tensor:
+    """The view over the whole latent, on the codec's time axis."""
+    return view.apply(latent, latent.shape[codec.time_dim], codec.time_dim)
+
+
 def measure(
-    codec: LatentCodec, wave: np.ndarray, mismatch: np.ndarray
+    codec: LatentCodec,
+    wave: np.ndarray,
+    mismatch: np.ndarray,
+    view: LatentView | None = None,
 ) -> dict[str, Any]:
-    """All four distances, plus the latent-space diagnostic, for one signal."""
+    """All four distances, plus the latent-space diagnostic, for one signal.
+
+    `view` defaults to time reversal; a block permutation asks the same
+    question of the jigsaw, with `reverse` read as "the viewed signal".
+    """
     rate = codec.sample_rate
-    reversed_wave = reverse_view(wave) if wave.ndim == 1 else wave[:, ::-1].copy()
+    if view is None:
+        reversed_wave = reverse_view(wave) if wave.ndim == 1 else wave[:, ::-1].copy()
+        flip = codec.flip_time
+    else:
+        reversed_wave = VIEWS[view.name if view.name in VIEWS else "reverse"](
+            wave, rate
+        )
+
+        def flip(latent: torch.Tensor) -> torch.Tensor:
+            return apply_latent_view(codec, view, latent)
 
     z = codec.encode(wave)
     z_reversed = codec.encode(reversed_wave)
-    flipped = codec.flip_time(z)
+    flipped = flip(z)
 
     decoded = {
         "floor_forward": codec.decode(z),
@@ -132,7 +168,28 @@ def measure(
     }
 
 
-def run(out_dir: Path, codec: LatentCodec, signals: dict[str, np.ndarray]) -> Path:
+def trim_to_blocks(
+    signals: dict[str, np.ndarray], samples_per_block: int
+) -> dict[str, np.ndarray]:
+    """Cut every signal to a whole number of blocks.
+
+    The waveform view cuts at `n // blocks`; the latent view at
+    `frames // blocks`. They coincide only when n is a multiple of the block
+    length in samples, so the signals are made so before being measured.
+    """
+    out = {}
+    for name, wave in signals.items():
+        n = wave.shape[-1] // samples_per_block * samples_per_block
+        out[name] = np.ascontiguousarray(wave[..., :n])
+    return out
+
+
+def run(
+    out_dir: Path,
+    codec: LatentCodec,
+    signals: dict[str, np.ndarray],
+    view: LatentView | None = None,
+) -> Path:
     rate = codec.sample_rate
     names = list(signals)
     results: dict[str, Any] = {}
@@ -140,7 +197,7 @@ def run(out_dir: Path, codec: LatentCodec, signals: dict[str, np.ndarray]) -> Pa
     for index, name in enumerate(names):
         # The far end of the scale: a different signal from the same set.
         mismatch = signals[names[(index + 1) % len(names)]]
-        entry = measure(codec, signals[name], mismatch)
+        entry = measure(codec, signals[name], mismatch, view)
 
         audio_dir = out_dir / "audio" / name
         write_wav(audio_dir / "input.wav", signals[name], rate)
@@ -159,6 +216,7 @@ def run(out_dir: Path, codec: LatentCodec, signals: dict[str, np.ndarray]) -> Pa
         "codec": type(codec).__name__,
         "model_id": getattr(codec, "model_id", "?"),
         "sample_rate": rate,
+        "view": "time_reverse" if view is None else view.name,
         "signals": results,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -169,17 +227,55 @@ def run(out_dir: Path, codec: LatentCodec, signals: dict[str, np.ndarray]) -> Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("results/step0b"))
     parser.add_argument(
-        "--generated", type=Path, default=Path("results/smoke_stable_audio")
+        "--codec",
+        choices=sorted(CODECS),
+        default="stable_audio",
+        help="which autoencoder to measure",
     )
-    parser.add_argument("--model-id", default="stabilityai/stable-audio-open-1.0")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="default results/step0b (stable_audio) or results/step0b_<codec>",
+    )
+    parser.add_argument(
+        "--generated",
+        type=Path,
+        default=None,
+        help="default results/smoke_<codec>, the matching smoke script's clips",
+    )
+    parser.add_argument("--model-id", default=None, help="default: the codec's own")
+    parser.add_argument(
+        "--view",
+        choices=sorted(LATENT_VIEWS),
+        default="time_reverse",
+        help="the latent view to measure; jigsaw_4 trims signals to whole blocks",
+    )
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
-    codec = StableAudioCodec(model_id=args.model_id, device=args.device)
-    signals = {**probe_signals(codec.sample_rate), **load_generated(args.generated)}
-    path = run(args.out, codec, signals)
+    codec_cls = CODECS[args.codec]
+    codec: LatentCodec = (
+        codec_cls(model_id=args.model_id, device=args.device)
+        if args.model_id
+        else codec_cls(device=args.device)
+    )
+    suffix = "" if args.codec == "stable_audio" else f"_{args.codec}"
+    if args.view != "time_reverse":
+        suffix += f"_{args.view}"
+    out_dir = args.out or Path(f"results/step0b{suffix}")
+    generated = args.generated or Path(f"results/smoke_{args.codec}")
+    signals = {
+        **probe_signals(codec.sample_rate),
+        **load_generated(generated, codec.sample_rate),
+    }
+    view: LatentView | None = None
+    if args.view != "time_reverse":
+        view = LATENT_VIEWS[args.view]
+        blocks = len(getattr(view, "perm", ()))
+        signals = trim_to_blocks(signals, blocks * codec.samples_per_frame)
+    path = run(out_dir, codec, signals, view)
 
     result = json.loads(path.read_text(encoding="utf-8"))
     print(f"wrote {path}\n")
@@ -193,8 +289,8 @@ def main() -> None:
             f" {data['headroom_db']:+9.3f} {data['null_db']:8.3f}"
             f" {data['mismatch_db']:9.3f} {data['latent_cosine']:8.4f}"
         )
-    print("\nheadroom = measured - floor_reverse: near 0 means flipping the latent")
-    print("reverses the audio. null = what measured would be if the flip did")
+    print("\nheadroom = measured - floor_reverse: near 0 means the latent view is")
+    print("the listener's view. null = what measured would be if the view did")
     print("nothing; it must be large for headroom to mean anything.")
 
 

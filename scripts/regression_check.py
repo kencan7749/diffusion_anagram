@@ -1,17 +1,17 @@
-"""Does this environment still reproduce runs_gpt2?
+"""Does this environment still reproduce an earlier run?
 
 Written to be run once before a dependency upgrade and again after it. The
-reference is not a snapshot taken for the occasion -- it is the run itself.
-`runs_gpt2/search` holds, for all 128 candidates, the prompts, the seed, the
-generated PNG, the far view, and every CLIP score. That is a complete record
-of what this code did, so "still works" can be asked as "produces the same
-bytes and the same numbers".
+reference is not a snapshot taken for the occasion -- it is the run itself. A
+run directory holds, for every candidate, the prompts, the seed, the generated
+PNG, the scored views, and every CLIP score. That is a complete record of what
+this code did, so "still works" can be asked as "produces the same bytes and
+the same numbers".
 
 Three axes, independent and in increasing cost, because they break for
 different reasons and a single pass/fail would not say which:
 
-  views       recompute far_view() from the stored PNG, compare to far.png
-              -> torchvision. No model, runs on everything, effectively free.
+  views       recompute the perceptual views from the stored PNG, compare to
+              the stored view images -> torchvision. No model, effectively free.
   judge       re-score the stored PNG, compare to scores.jsonl
               -> transformers / CLIP. Cheap; no generation involved.
   generation  regenerate from the spec and seed, compare to sample_256.png
@@ -21,7 +21,10 @@ Two guards make the comparison mean what it claims:
 
   spec identity   the reconstructed CandidateSpec must hash to the uid stored
                   in the row. Otherwise a "difference" could just be a
-                  different prompt being generated.
+                  different prompt being generated. Runs written before the
+                  N-view spec (rows with `prompt_low` / `prompt_high`) cannot
+                  pass this guard, because the uid formula changed; they are
+                  still compared, and the mismatch is reported as such.
   noise floor     one spec is generated twice in this environment, and both
                   are scored. Sampling is not bit-reproducible in general, so
                   the gap between two runs made minutes apart on one machine
@@ -34,7 +37,7 @@ floor. Hashes and pixel deltas are recorded as diagnostics -- they say how
 much moved, not whether it mattered -- and every raw number is written out so
 a tolerance can be chosen after seeing them rather than before.
 
-    .venv/bin/python -m scripts.regression_check --label pre-upgrade
+    .venv/bin/python -m scripts.regression_check --run runs/myrun --label pre-upgrade
 """
 
 from __future__ import annotations
@@ -50,18 +53,19 @@ import torch
 
 from ava.image.engine import save_sample
 from ava.image.judge import ClipBlipJudge, load_image
-from ava.image.perceive import far_view
+from ava.image.tasks import get_task
+from ava.image.views import ViewSet
 from ava.report import load_scores
 from ava.spec import CandidateSpec
-
-# The four raw cosines. These are what everything else is derived from, so a
-# change here is the root cause and j / sep_min are only symptoms.
-SCORE_KEYS = ("s_far_low", "s_far_high", "s_near_low", "s_near_high")
-DERIVED_KEYS = ("p_far", "p_near", "j", "sep_far", "sep_near", "sep_min")
 
 
 def md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def is_legacy(row: dict[str, Any]) -> bool:
+    """Rows from before the N-view spec name their two prompts explicitly."""
+    return "prompt_low" in row and "task" not in row
 
 
 def spec_from_row(row: dict[str, Any]) -> CandidateSpec:
@@ -71,12 +75,50 @@ def spec_from_row(row: dict[str, Any]) -> CandidateSpec:
     config.yaml used the CandidateSpec defaults, and the uid check below is
     what actually proves the reconstruction is right.
     """
+    if is_legacy(row):
+        return CandidateSpec(
+            task="hybrid",
+            prompts=(str(row["prompt_low"]), str(row["prompt_high"])),
+            style=str(row["style"]),
+            seed=int(row["seed"]),
+        )
     return CandidateSpec(
-        prompt_low=str(row["prompt_low"]),
-        prompt_high=str(row["prompt_high"]),
+        task=str(row["task"]),
+        prompts=tuple(str(p) for p in row["prompts"]),
         style=str(row["style"]),
         seed=int(row["seed"]),
+        ref_image=row.get("ref_image"),
     )
+
+
+def stored_scores(row: dict[str, Any]) -> dict[str, Any]:
+    """The stored raw matrix, per-view probabilities and margins, in one shape."""
+    if is_legacy(row):
+        return {
+            "scores": [
+                [float(row["s_far_low"]), float(row["s_far_high"])],
+                [float(row["s_near_low"]), float(row["s_near_high"])],
+            ],
+            "p": [float(row["p_far"]), float(row["p_near"])],
+            "sep": [float(row["sep_far"]), float(row["sep_near"])],
+            "j": float(row["j"]),
+            "sep_min": float(row["sep_min"]),
+            "diagnosis": str(row["diagnosis"]),
+            "view_paths": [None, str(row["far_image_path"])],
+        }
+    return {
+        "scores": row["scores"],
+        "p": row["p"],
+        "sep": row["sep"],
+        "j": float(row["j"]),
+        "sep_min": float(row["sep_min"]),
+        "diagnosis": str(row["diagnosis"]),
+        "view_paths": list(row["view_paths"]),
+    }
+
+
+def _flat(matrix: list[list[float]]) -> list[float]:
+    return [float(x) for r in matrix for x in r]
 
 
 def compare_images(a: Path, b: Path) -> dict[str, Any]:
@@ -95,47 +137,108 @@ def compare_images(a: Path, b: Path) -> dict[str, Any]:
     }
 
 
-def check_views(rows: list[dict[str, Any]], work: Path) -> list[dict[str, Any]]:
-    """Axis: does far_view() still produce the far.png that was stored?"""
+class ViewSets:
+    """Builds each task's views once, with the run's view seed."""
+
+    def __init__(self, view_seed: int) -> None:
+        self.view_seed = view_seed
+        self._cache: dict[str, ViewSet] = {}
+
+    def get(self, task: str) -> ViewSet:
+        if task not in self._cache:
+            self._cache[task] = ViewSet.build(get_task(task), seed=self.view_seed)
+        return self._cache[task]
+
+
+def check_views(
+    rows: list[dict[str, Any]], work: Path, viewsets: ViewSets
+) -> list[dict[str, Any]]:
+    """Axis: do the perceptual views still produce the stored view images?"""
     from torchvision.utils import save_image
 
     out: list[dict[str, Any]] = []
     for row in rows:
-        stored_far = Path(str(row["far_image_path"]))
+        spec = spec_from_row(row)
+        viewset = viewsets.get(spec.task)
         image = load_image(str(row["image_path"]))
-        recomputed = work / str(row["uid"]) / "far_recomputed.png"
-        recomputed.parent.mkdir(parents=True, exist_ok=True)
-        save_image(far_view(image), recomputed, padding=0)
-        out.append({"uid": row["uid"], **compare_images(stored_far, recomputed)})
+        stored = stored_scores(row)["view_paths"]
+        entry: dict[str, Any] = {"uid": row["uid"], "views": {}}
+        for slot, view, path in zip(
+            viewset.task.slot_names, viewset.perceive(image), stored, strict=True
+        ):
+            if path is None:
+                continue
+            recomputed = work / str(row["uid"]) / f"view_{slot}_recomputed.png"
+            recomputed.parent.mkdir(parents=True, exist_ok=True)
+            save_image(view, recomputed, padding=0)
+            entry["views"][slot] = compare_images(Path(path), recomputed)
+        entry["same_bytes"] = all(v["same_bytes"] for v in entry["views"].values())
+        entry["max_abs_diff_8bit"] = max(
+            (v.get("max_abs_diff_8bit", 255.0) for v in entry["views"].values()),
+            default=0.0,
+        )
+        out.append(entry)
     return out
 
 
 def check_judge(
-    rows: list[dict[str, Any]], judge: ClipBlipJudge
+    rows: list[dict[str, Any]], judge: ClipBlipJudge, viewsets: ViewSets
 ) -> list[dict[str, Any]]:
     """Axis: does CLIP still give the stored image the stored scores?"""
     out: list[dict[str, Any]] = []
     for row in rows:
         spec = spec_from_row(row)
-        verdict = judge.evaluate(load_image(str(row["image_path"])), spec)
-        fresh = json.loads(verdict.to_json())
+        viewset = viewsets.get(spec.task)
+        fresh = json.loads(
+            judge.evaluate(load_image(str(row["image_path"])), spec, viewset).to_json()
+        )
+        stored = stored_scores(row)
         out.append(
             {
                 "uid": row["uid"],
+                "legacy_row": is_legacy(row),
                 "uid_matches_spec": spec.uid() == row["uid"],
-                "raw": {k: abs(float(fresh[k]) - float(row[k])) for k in SCORE_KEYS},
+                "raw_max_delta": max(
+                    abs(a - b)
+                    for a, b in zip(
+                        _flat(fresh["scores"]), _flat(stored["scores"]), strict=True
+                    )
+                ),
                 "derived": {
-                    k: abs(float(fresh[k]) - float(row[k])) for k in DERIVED_KEYS
+                    "p": max(
+                        abs(float(a) - float(b))
+                        for a, b in zip(fresh["p"], stored["p"], strict=True)
+                    ),
+                    "sep": max(
+                        abs(float(a) - float(b))
+                        for a, b in zip(fresh["sep"], stored["sep"], strict=True)
+                    ),
+                    "j": abs(float(fresh["j"]) - stored["j"]),
+                    "sep_min": abs(float(fresh["sep_min"]) - stored["sep_min"]),
                 },
-                "diagnosis_stored": row["diagnosis"],
+                "diagnosis_stored": _modern_diagnosis(stored["diagnosis"], viewset),
                 "diagnosis_now": fresh["diagnosis"],
             }
         )
     return out
 
 
+def _modern_diagnosis(diagnosis: str, viewset: ViewSet) -> str:
+    """Map the two-view diagnosis names onto the N-view ones."""
+    legacy = {
+        "pair_mismatch": "all_lost",
+        "low_loses": f"lost:{viewset.task.slot_names[0]}",
+        "high_absent": f"lost:{viewset.task.slot_names[1]}",
+    }
+    return legacy.get(diagnosis, diagnosis)
+
+
 def check_generation(
-    rows: list[dict[str, Any]], work: Path, device: str, judge: ClipBlipJudge
+    rows: list[dict[str, Any]],
+    work: Path,
+    device: str,
+    judge: ClipBlipJudge,
+    viewsets: ViewSets,
 ) -> dict[str, Any]:
     """Axis: does the sampler still put a candidate in the same place?
 
@@ -157,14 +260,22 @@ def check_generation(
 
     for index, row in enumerate(rows):
         spec = spec_from_row(row)
-        image_path = save_sample(engine.generate(spec)[1], work / str(row["uid"]))
-        fresh = json.loads(judge.evaluate(load_image(image_path), spec).to_json())
+        viewset = viewsets.get(spec.task)
+        stored = stored_scores(row)
+        image_path = save_sample(
+            engine.generate(spec, viewset)[1], work / str(row["uid"])
+        )
+        fresh = json.loads(
+            judge.evaluate(load_image(image_path), spec, viewset).to_json()
+        )
 
         if index == 0:
             again_path = save_sample(
-                engine.generate(spec)[1], work / f"{row['uid']}_again"
+                engine.generate(spec, viewset)[1], work / f"{row['uid']}_again"
             )
-            twice = json.loads(judge.evaluate(load_image(again_path), spec).to_json())
+            twice = json.loads(
+                judge.evaluate(load_image(again_path), spec, viewset).to_json()
+            )
             control = {
                 "uid": row["uid"],
                 "j_delta": abs(float(twice["j"]) - float(fresh["j"])),
@@ -173,17 +284,18 @@ def check_generation(
                 **compare_images(image_path, again_path),
             }
 
+        stored_diagnosis = _modern_diagnosis(stored["diagnosis"], viewset)
         results.append(
             {
                 "uid": row["uid"],
                 "uid_matches_spec": spec.uid() == row["uid"],
-                "j_stored": float(row["j"]),
+                "j_stored": stored["j"],
                 "j_now": float(fresh["j"]),
-                "j_delta": abs(float(fresh["j"]) - float(row["j"])),
-                "sep_min_delta": abs(float(fresh["sep_min"]) - float(row["sep_min"])),
-                "diagnosis_stored": row["diagnosis"],
+                "j_delta": abs(float(fresh["j"]) - stored["j"]),
+                "sep_min_delta": abs(float(fresh["sep_min"]) - stored["sep_min"]),
+                "diagnosis_stored": stored_diagnosis,
                 "diagnosis_now": fresh["diagnosis"],
-                "diagnosis_unchanged": fresh["diagnosis"] == row["diagnosis"],
+                "diagnosis_unchanged": fresh["diagnosis"] == stored_diagnosis,
                 **compare_images(Path(str(row["image_path"])), image_path),
             }
         )
@@ -205,30 +317,30 @@ def run(args: argparse.Namespace) -> Path:
     if not rows:
         raise SystemExit(f"no scores found under {args.run}")
 
+    viewsets = ViewSets(view_seed=args.view_seed)
     work = Path(args.out) / args.label
     result: dict[str, Any] = {
         "label": args.label,
         "run": str(args.run),
         "candidates_available": len(rows),
+        "legacy_rows": sum(is_legacy(r) for r in rows),
         "versions": _versions(),
-        "views": check_views(rows, work),
+        "views": check_views(rows, work, viewsets),
     }
 
     judge = ClipBlipJudge(device=args.device, use_blip=False)
-    result["judge"] = check_judge(rows, judge)
+    result["judge"] = check_judge(rows, judge, viewsets)
 
     if args.generate > 0:
         result["generation"] = check_generation(
-            rows[: args.generate], work, args.device, judge
+            rows[: args.generate], work, args.device, judge, viewsets
         )
 
     result["summary"] = {
         "views_all_identical": all(v["same_bytes"] for v in result["views"]),
         "views_worst_max_abs_diff_8bit": worst(result["views"], "max_abs_diff_8bit"),
         "judge_all_uids_match": all(j["uid_matches_spec"] for j in result["judge"]),
-        "judge_worst_raw_delta": max(
-            (max(j["raw"].values()) for j in result["judge"]), default=0.0
-        ),
+        "judge_worst_raw_delta": worst(result["judge"], "raw_max_delta"),
         "judge_worst_derived_delta": max(
             (max(j["derived"].values()) for j in result["judge"]), default=0.0
         ),
@@ -284,6 +396,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("results/regression"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--view-seed",
+        type=int,
+        default=0,
+        help="the run's view seed (config.yaml: view_seed); randomised views only",
+    )
+    parser.add_argument(
         "--generate",
         type=int,
         default=4,
@@ -296,7 +414,10 @@ def main() -> None:
 
     print(f"wrote {path}\n")
     print("versions: " + ", ".join(f"{k} {v}" for k, v in result["versions"].items()))
-    print(f"candidates: {result['candidates_available']}\n")
+    print(
+        f"candidates: {result['candidates_available']} "
+        f"({result['legacy_rows']} written before the N-view spec)\n"
+    )
     for key, value in result["summary"].items():
         print(f"  {key:38s} {value}")
 

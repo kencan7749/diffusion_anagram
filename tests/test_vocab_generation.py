@@ -23,10 +23,10 @@ from ava.vocab import (
     update_arm,
 )
 from ava_vocab.generate_vocab import (
+    DEFAULT_ARMS,
     EXEMPLARS,
     INSERT_COLUMNS,
     LLM_SOURCE,
-    SUBJECT_ROLES,
     SamplingConfig,
     Suggestion,
     as_suggestions,
@@ -77,9 +77,10 @@ def test_prompt_rotates_its_exemplars() -> None:
 
 def test_exemplars_are_seed_vocabulary() -> None:
     """Conditioning must not smuggle in vocabulary the project never committed to."""
-    from ava.vocab import TIER1, TIER2, TIER3
+    from ava.vocab import HYBRID_TIER1, HYBRID_TIER2, HYBRID_TIER3
 
-    seeded = {w for w, _ in TIER1} | {w for w, _ in TIER2} | set(TIER3)
+    seeded = {w for w, _ in HYBRID_TIER1} | {w for w, _ in HYBRID_TIER2}
+    seeded |= set(HYBRID_TIER3)
     assert set(EXEMPLARS) <= seeded
 
 
@@ -161,11 +162,25 @@ def test_clean_preserves_order_and_drops_duplicates() -> None:
 # -- roles ---------------------------------------------------------------
 
 
-def test_both_roles_are_registered_for_every_word() -> None:
+def test_both_hybrid_roles_are_registered_for_every_word() -> None:
     """No role is inferred; list continuation carries no frequency signal."""
     suggestions = as_suggestions(["a gecko"])
-    assert {s.role for s in suggestions} == set(SUBJECT_ROLES)
+    assert {(s.task, s.role) for s in suggestions} == {
+        ("hybrid", "low"),
+        ("hybrid", "high"),
+    }
     assert {s.word for s in suggestions} == {"a gecko"}
+    assert DEFAULT_ARMS == ("hybrid:low", "hybrid:high")
+
+
+def test_arms_can_target_other_tasks() -> None:
+    suggestions = as_suggestions(["a gecko"], arms=("flip:subject", "hybrid:low"))
+    assert {(s.task, s.role) for s in suggestions} == {
+        ("flip", "subject"),
+        ("hybrid", "low"),
+    }
+    with pytest.raises(SystemExit):
+        as_suggestions(["a gecko"], arms=("flip",))
 
 
 # -- sampling ------------------------------------------------------------
@@ -218,9 +233,9 @@ def test_greedy_with_multiple_draws_is_refused() -> None:
 
 def test_inserted_words_are_untried_with_a_uniform_prior(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
-    assert insert_suggestions(conn, [Suggestion("a lighthouse", "low")]) == 1
+    assert insert_suggestions(conn, [Suggestion("a lighthouse", "hybrid", "low")]) == 1
 
-    arm = next(a for a in list_arms(conn, "low") if a.word == "a lighthouse")
+    arm = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a lighthouse")
     assert (arm.alpha, arm.beta) == (1.0, 1.0)
     assert arm.n_trials == 0
     assert arm.source == LLM_SOURCE
@@ -230,11 +245,11 @@ def test_insertion_never_resets_an_arm_that_has_evidence(tmp_path: Path) -> None
     """A re-sampled word must keep the trials it already earned."""
     conn = connect(tmp_path / "vocab.db")
     seed_author_vocab(conn)
-    update_arm(conn, "a panda", "low", 1.0)
-    before = next(a for a in list_arms(conn, "low") if a.word == "a panda")
+    update_arm(conn, "a panda", "hybrid", "low", 1.0)
+    before = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a panda")
 
-    assert insert_suggestions(conn, [Suggestion("a panda", "low")]) == 0
-    after = next(a for a in list_arms(conn, "low") if a.word == "a panda")
+    assert insert_suggestions(conn, [Suggestion("a panda", "hybrid", "low")]) == 0
+    after = next(a for a in list_arms(conn, "hybrid", "low") if a.word == "a panda")
     assert (after.alpha, after.n_trials, after.source) == (
         before.alpha,
         before.n_trials,
@@ -247,12 +262,12 @@ def test_generated_words_become_injectable_arms(tmp_path: Path) -> None:
     conn = connect(tmp_path / "vocab.db")
     seed_author_vocab(conn)
     for arm in list_arms(conn):
-        update_arm(conn, arm.word, arm.role, 0.5)
-    assert untried_arms(conn, "low") == []
+        update_arm(conn, arm.word, arm.task, arm.role, 0.5)
+    assert untried_arms(conn, "hybrid", "low") == []
 
     insert_suggestions(conn, as_suggestions(["a lighthouse"]))
-    assert [a.word for a in untried_arms(conn, "low")] == ["a lighthouse"]
-    assert [a.word for a in untried_arms(conn, "high")] == ["a lighthouse"]
+    assert [a.word for a in untried_arms(conn, "hybrid", "low")] == ["a lighthouse"]
+    assert [a.word for a in untried_arms(conn, "hybrid", "high")] == ["a lighthouse"]
 
 
 def test_provenance_records_seed_and_hyperparameters(tmp_path: Path) -> None:
@@ -294,3 +309,79 @@ def test_provenance_appends_rather_than_overwrites(tmp_path: Path) -> None:
         record = {"draw": 0, **SamplingConfig(seed=seed).as_dict()}
         write_provenance(log, [record], added=seed)
     assert len(log.read_text().strip().splitlines()) == 2
+
+
+# -- the sound format (sound sources for the time-reversal task) --------------
+
+
+def test_sound_format_is_a_comma_list_of_short_sources() -> None:
+    from ava_vocab.generate_vocab import SOUND_FORMAT
+
+    text = "a church bell, a slamming door, and then the sound of, a kettle\nprose"
+    assert SOUND_FORMAT.clean([text]) == [
+        "a church bell",
+        "a slamming door",
+        "a kettle",
+    ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["a dog barking", "a passing train", "rain on a tin roof", "a corpse falling"],
+)
+def test_sound_format_applies_the_subject_rule_and_its_blocklist(line: str) -> None:
+    from ava_vocab.generate_vocab import extract_phrase, extract_sound
+
+    assert extract_sound(line) == extract_phrase(line)
+
+
+@pytest.mark.parametrize("line", ["a gunshot", "a bomb going off", "people screaming"])
+def test_sound_format_refuses_weapons_and_violence(line: str) -> None:
+    from ava_vocab.generate_vocab import extract_sound
+
+    assert extract_sound(line) is None
+
+
+def test_sound_prompt_uses_committed_sources_and_rotates() -> None:
+    from ava.audio.vocab import SOURCE_PROMPTS
+    from ava_vocab.generate_vocab import SOUND_EXEMPLARS, SOUND_FORMAT
+
+    assert set(SOUND_EXEMPLARS) <= set(SOURCE_PROMPTS)
+    prompt = SOUND_FORMAT.build_prompt(0)
+    assert prompt.startswith("Sounds to record: ") and prompt == prompt.rstrip()
+    assert SOUND_FORMAT.build_prompt(0) != SOUND_FORMAT.build_prompt(1)
+
+
+def test_subject_format_is_the_original_behaviour() -> None:
+    from ava_vocab.generate_vocab import SUBJECT_FORMAT, build_prompt, clean
+
+    assert SUBJECT_FORMAT.build_prompt(2) == build_prompt(2)
+    text = "a fox, a barn, the barn, a gecko\nprose"
+    assert SUBJECT_FORMAT.clean([text]) == clean([text])
+
+
+def test_llm_supply_derives_a_new_seed_per_call(tmp_path: Path) -> None:
+    """Two calls in one round, and the same call in two rounds, must not repeat."""
+    from ava_vocab.generate_vocab import LlmSupply
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.seeds: list[int] = []
+
+        def sample(self, sampling: SamplingConfig, fmt):
+            self.seeds.append(sampling.seed)
+            return [f"a word {sampling.seed}"], []
+
+    supply = LlmSupply.__new__(LlmSupply)
+    supply.draws, supply.seed, supply.log_path = 1, 0, None
+    supply.formats, supply._calls = {}, {}
+    recorder = Recorder()
+    supply._sampler = recorder  # type: ignore[assignment]
+    conn = connect(tmp_path / "vocab.db")
+    assert supply.supply(conn, "time_reverse", "subject", 0) == 1
+    assert supply.supply(conn, "time_reverse", "subject", 0) == 1
+    assert supply.supply(conn, "time_reverse", "subject", 1) == 1
+    assert len(set(recorder.seeds)) == 3
+    arms = list_arms(conn, "time_reverse", "subject")
+    assert len(arms) == 3 and {a.source for a in arms} == {"llm"}
+    conn.close()

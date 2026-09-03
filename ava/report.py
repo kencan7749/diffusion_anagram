@@ -2,17 +2,18 @@
 
 Both are pure functions of what a run already persisted. Nothing here
 regenerates an image, re-runs the judge, or refits anything: the loop saved the
-scored near/far views next to the scores, so changing a layout, a colour or a
+scored view images next to the scores, so changing a layout, a colour or a
 label never triggers a recompute.
 
   contact_sheet.png  where a human picks the interesting images. Every cell
-                     carries the original, its far view, both prompts and J,
-                     because the screening score is explicitly not a measure of
-                     interestingness and the person looking has to be able to
-                     disagree with it.
+                     carries each view the judge looked at, every prompt and the
+                     score, because the screening score is explicitly not a
+                     measure of interestingness and the person looking has to
+                     be able to disagree with it.
   components.md      where the knowledge accumulates. The Beta posterior of
                      each arm IS the answer to "which prompts make good
-                     illusions", and it keeps improving across runs.
+                     illusions in which view", and it keeps improving across
+                     runs.
 """
 
 from __future__ import annotations
@@ -26,42 +27,34 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from visual_anagrams.utils import get_courier_font_path
 
-from ava.vocab import ROLES, Arm, Role, list_arms
+from ava.vocab import STYLE, Arm, list_arms, list_tasks
 
 CELL = 192
 PAD = 8
 HEADER = 22
-CAPTION = 58
+LINE = 13
 BG = (255, 255, 255)
 FG = (20, 20, 20)
 MUTED = (110, 110, 110)
 
-# What each role's posterior was built from, shown in the table header so the
-# numbers cannot be misread as a single undifferentiated "score".
-ROLE_SIGNAL: dict[Role, str] = {
-    "low": "p_far (survives blurring)",
-    "high": "p_near (readable up close)",
-    "style": "J (the pair worked at all)",
-}
-
 
 def rank_score(row: dict[str, Any]) -> float:
-    """Order candidates by the weaker raw CLIP margin, not by J.
+    """Order candidates by the weakest raw CLIP margin, not by J.
 
-    Ordering by this is equivalent to ordering by J -- a two-way softmax is a
-        sigmoid of the margin, so J == sigmoid(logit_scale * sep_min) -- but it is
-        readable and it does not run out of precision. A sweep's top 13 all printed
-        as J >= 0.99 while their margins spanned +0.048 to +0.114, and past a margin
-        of roughly 0.37 the sigmoid saturates to exactly 1.0 in float64, at which
-        point a top-N selection really would be picking among ties.
+    For two views this is the same order J gives -- a two-way softmax is a
+    sigmoid of the margin, so J == sigmoid(logit_scale * sep_min) -- but it is
+    readable and it does not run out of precision. A sweep's top 13 all printed
+    as J >= 0.99 while their margins spanned +0.048 to +0.114, and past a margin
+    of roughly 0.37 the sigmoid saturates to exactly 1.0 in float64, at which
+    point a top-N selection really would be picking among ties.
 
-        J still decides whether a candidate is shown at all. Screening wants the
-        saturated signal; the ordering does not.
+    J still decides whether a candidate is shown at all. Screening wants the
+    saturated signal; the ordering does not.
     """
     if "sep_min" in row:
         return float(row["sep_min"])
-    # Rows written before sep_min was persisted still rank correctly.
-    return min(float(row["sep_far"]), float(row["sep_near"]))
+    # A row without the derived field still ranks by its weakest view.
+    return min(float(x) for x in row["sep"])
 
 
 def load_scores(path: Path) -> list[dict[str, Any]]:
@@ -78,6 +71,16 @@ def _shorten(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
+def _caption_lines(row: dict[str, Any], width: int) -> list[str]:
+    slots = [str(s) for s in row["slots"]]
+    prompts = [str(p) for p in row["prompts"]]
+    lines = [f"{row['task']}"]
+    for slot, prompt in zip(slots, prompts, strict=True):
+        lines.append(_shorten(f"{slot}: {prompt}", width))
+    lines.append(_shorten(f"style: {row['style'] or '(none)'}", width))
+    return lines
+
+
 def build_contact_sheet(
     rows: list[dict[str, Any]],
     out: Path,
@@ -85,11 +88,11 @@ def build_contact_sheet(
     cell: int = CELL,
     min_j: float | None = None,
 ) -> Path:
-    """Lay out the candidates, best J first.
+    """Lay out the candidates, best first.
 
-    Ordered by `rank_score` (the weaker raw CLIP margin), gated by J. The
-    order is the same one J gives; the margin is simply legible where J has
-    saturated.
+    Ordered by `rank_score` (the weakest raw CLIP margin), gated by J. Each
+    cell stacks every view the judge scored, in slot order, so a flip shows
+    the image and its flipped copy and a triple hybrid shows three blur levels.
 
     `min_j` hides the tail that the visual check found not worth looking at.
     It only affects this drawing: every candidate stays in scores.jsonl, so
@@ -110,13 +113,26 @@ def build_contact_sheet(
                 f"every candidate scored below min_j={min_j}; nothing to draw"
             )
         ranked = shown
-    n_rows = (len(ranked) + columns - 1) // columns
+
+    # Each grid row is as tall as its tallest cell (a four-view candidate
+    # stacks four images), so a sheet mixing tasks does not pad every cell to
+    # the largest task.
+    grid_rows = [ranked[i : i + columns] for i in range(0, len(ranked), columns)]
+    row_heights = []
+    for group in grid_rows:
+        views = max(len(r["view_paths"]) for r in group)
+        lines = max(len(r["slots"]) for r in group) + 3  # task, score, style
+        row_heights.append(cell * views + LINE * lines + 6)
+    row_tops = [0] * len(grid_rows)
+    for i in range(1, len(grid_rows)):
+        row_tops[i] = row_tops[i - 1] + row_heights[i - 1] + PAD
     banner = HEADER if hidden else 0
-    # Two images per cell, stacked: the original and its far view.
-    cell_h = cell * 2 + CAPTION
     sheet = Image.new(
         "RGB",
-        (columns * (cell + PAD) + PAD, banner + n_rows * (cell_h + PAD) + PAD),
+        (
+            columns * (cell + PAD) + PAD,
+            banner + row_tops[-1] + row_heights[-1] + 2 * PAD,
+        ),
         BG,
     )
     draw = ImageDraw.Draw(sheet)
@@ -134,24 +150,22 @@ def build_contact_sheet(
 
     for i, row in enumerate(ranked):
         x = PAD + (i % columns) * (cell + PAD)
-        y = banner + PAD + (i // columns) * (cell_h + PAD)
+        y = banner + PAD + row_tops[i // columns]
 
-        near = Image.open(str(row["image_path"])).convert("RGB").resize((cell, cell))
-        far = Image.open(str(row["far_image_path"])).convert("RGB").resize((cell, cell))
-        sheet.paste(near, (x, y))
-        sheet.paste(far, (x, y + cell))
+        for v, path in enumerate(row["view_paths"]):
+            image = Image.open(str(path)).convert("RGB").resize((cell, cell))
+            sheet.paste(image, (x, y + v * cell))
 
+        text_y = y + len(row["view_paths"]) * cell + 3
         draw.text(
-            (x, y + 2 * cell + 3),
+            (x, text_y),
             f"sep={rank_score(row):+.3f}  J={float(row['j']):.3f}",
             font=f_body,
             fill=FG,
         )
         draw.text(
-            (x, y + 2 * cell + 17),
-            f"lo {_shorten(str(row['prompt_low']), width_chars)}\n"
-            f"hi {_shorten(str(row['prompt_high']), width_chars)}\n"
-            f"st {_shorten(str(row['style']) or '(none)', width_chars)}",
+            (x, text_y + LINE),
+            "\n".join(_caption_lines(row, width_chars)),
             font=f_small,
             fill=MUTED,
         )
@@ -161,22 +175,29 @@ def build_contact_sheet(
     return out
 
 
+def role_signal(role: str) -> str:
+    """What each role's posterior was built from, so the numbers cannot be misread."""
+    if role == STYLE:
+        return "J (the candidate worked at all)"
+    return f"p (the {role} view read as its prompt)"
+
+
 def _rank_role(
-    conn: sqlite3.Connection, role: Role, rng: np.random.Generator
+    conn: sqlite3.Connection, task: str, role: str, rng: np.random.Generator
 ) -> list[str]:
-    arms = sorted(list_arms(conn, role), key=lambda a: a.mean, reverse=True)
+    arms = sorted(list_arms(conn, task, role), key=lambda a: a.mean, reverse=True)
     lines = [
-        f"### role = `{role}` — ranked by {ROLE_SIGNAL[role]}",
+        f"### task = `{task}`, role = `{role}` — ranked by {role_signal(role)}",
         "",
-        "| word | mean | 90% CI | n | source |",
-        "|---|---|---|---|---|",
+        "| word | mean | 90% CI | n | source | citation |",
+        "|---|---|---|---|---|---|",
     ]
     for arm in arms:
         lo, hi = arm.credible_interval(rng)
         word = f"`{arm.word}`" if arm.word else "_(no style prefix)_"
         lines.append(
             f"| {word} | {arm.mean:.3f} | {lo:.3f}–{hi:.3f} "
-            f"| {arm.n_trials} | {arm.source} |"
+            f"| {arm.n_trials} | {arm.source} | {arm.citation} |"
         )
     lines.append("")
     return lines
@@ -187,7 +208,7 @@ def write_components(
     out: Path,
     rng: np.random.Generator | None = None,
 ) -> Path:
-    """Write the component ranking table.
+    """Write the component ranking table, one section per (task, role).
 
     `rng` is injected so the credible intervals, which are estimated by
     sampling, are reproducible from a run's seed.
@@ -199,35 +220,50 @@ def write_components(
     lines = [
         "# Component ranking",
         "",
-        "Each row is a bandit arm: a `(word, role)` pair, not a word. A word can",
-        "rank high as the low-frequency subject and low as the high-frequency one,",
-        "and that difference is the point of the table.",
+        "Each row is a bandit arm: a `(word, task, role)` triple, not a word. A",
+        "word can rank high as the low-frequency subject of a hybrid and low as",
+        "the high-frequency one, or work in a flip and not in a jigsaw, and that",
+        "difference is the point of the table.",
         "",
         "`mean` is the Beta posterior mean, built from the signal named in each",
         "section heading. `n` is how many candidates contributed evidence; a high",
         "mean at `n = 0` is only the prior talking. The interval is an equal-tailed",
         "90% credible interval estimated by sampling.",
         "",
+        "A posterior is not a component's standing alone: a favoured arm is paired",
+        "with favoured partners, so its mean runs above what a uniform sweep",
+        "would measure. Use `--uniform` runs to estimate standing.",
+        "",
         f"Arms: {len(arms)} total, {untried} never tried.",
         "",
     ]
-    for role in ROLES:
-        lines += _rank_role(conn, role, rng)
+    for task in list_tasks(conn):
+        roles = sorted({a.role for a in arms if a.task == task}, key=_role_order)
+        for role in roles:
+            lines += _rank_role(conn, task, role, rng)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")
     return out
 
 
+def _role_order(role: str) -> tuple[int, str]:
+    return (1 if role == STYLE else 0, role)
+
+
 def write_round_report(rows: list[dict[str, Any]], out: Path, round_index: int) -> Path:
     """Per-round summary: what was proposed, what held up, and how things failed."""
     by_diagnosis: dict[str, int] = {}
     by_origin: dict[str, int] = {}
+    by_task: dict[str, int] = {}
     for row in rows:
-        d = str(row.get("diagnosis", "?"))
-        o = str(row.get("origin", "?"))
-        by_diagnosis[d] = by_diagnosis.get(d, 0) + 1
-        by_origin[o] = by_origin.get(o, 0) + 1
+        for table, key in (
+            (by_diagnosis, "diagnosis"),
+            (by_origin, "origin"),
+            (by_task, "task"),
+        ):
+            name = str(row.get(key, "?"))
+            table[name] = table.get(name, 0) + 1
 
     ranked = sorted(rows, key=rank_score, reverse=True)
     j_values = [float(r["j"]) for r in rows]
@@ -241,9 +277,12 @@ def write_round_report(rows: list[dict[str, Any]], out: Path, round_index: int) 
         f"- J: max {max(j_values):.3f}, median {float(np.median(j_values)):.3f}, "
         f"min {min(j_values):.3f}",
         "",
-        "## Diagnoses",
+        "## Tasks",
         "",
     ]
+    for name, count in sorted(by_task.items()):
+        lines.append(f"- `{name}`: {count}")
+    lines += ["", "## Diagnoses", ""]
     for name, count in sorted(by_diagnosis.items(), key=lambda kv: -kv[1]):
         lines.append(f"- `{name}`: {count}")
     lines += ["", "## Where the candidates came from", ""]
@@ -254,24 +293,22 @@ def write_round_report(rows: list[dict[str, Any]], out: Path, round_index: int) 
         "",
         "## Candidates, best first",
         "",
-        "Ordered by `sep` = min(`sep_far`, `sep_near`), the weaker of the two raw",
-        "CLIP cosine margins. J is not the sort key: its softmax runs at CLIP's",
-        "logit_scale of 100, so a margin of 0.05 already reads as 0.99 and the",
-        "best candidates come out tied. J still decides what is shown at all.",
+        "Ordered by `sep` = the weakest view's raw CLIP margin over its runner-up",
+        "prompt. J is not the sort key: its softmax runs at CLIP's logit_scale of",
+        "100, so a margin of 0.05 already reads as 0.99 and the best candidates",
+        "come out tied. J still decides what is shown at all.",
         "",
-        "| sep | J | p_far | p_near | sep_far | sep_near | diagnosis "
-        "| low | high | style |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| sep | J | A | C | diagnosis | task | prompts (slot order) | style |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in ranked:
         style = str(r["style"]) or "—"
+        prompts = " / ".join(str(p) for p in r["prompts"])
         lines.append(
             f"| {rank_score(r):+.3f} "
-            f"| {float(r['j']):.3f} | {float(r['p_far']):.3f} "
-            f"| {float(r['p_near']):.3f} "
-            f"| {float(r['sep_far']):+.3f} | {float(r['sep_near']):+.3f} "
-            f"| {r['diagnosis']} | {r['prompt_low']} | {r['prompt_high']} "
-            f"| {style} |"
+            f"| {float(r['j']):.3f} | {float(r['alignment']):.3f} "
+            f"| {float(r['concealment']):.3f} "
+            f"| {r['diagnosis']} | {r['task']} | {prompts} | {style} |"
         )
 
     out.parent.mkdir(parents=True, exist_ok=True)

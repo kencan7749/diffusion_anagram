@@ -35,7 +35,7 @@ def test_reverse_view_returns_a_contiguous_copy() -> None:
 
 
 def test_both_views_are_registered() -> None:
-    assert set(VIEWS) == {"forward", "reverse"}
+    assert {"forward", "reverse"} <= set(VIEWS)
 
 
 def test_reverse_view_reverses_time_not_channels() -> None:
@@ -88,3 +88,28 @@ def test_resampling_does_not_wrap_the_end_into_the_beginning() -> None:
     wave = np.concatenate([np.zeros(n // 2), np.ones(n - n // 2)])
     out = resample(wave, 44_100, 48_000)
     assert np.abs(out[: out.size // 4]).max() < 0.05
+
+
+# ---- the far view -------------------------------------------------------------
+
+
+def test_lowpass_view_removes_the_high_band_and_keeps_the_low() -> None:
+    from ava.audio.perceive import VIEWS, lowpass_view
+
+    rate = 16_000
+    t = np.arange(rate) / rate
+    low, high = np.sin(2 * np.pi * 200 * t), np.sin(2 * np.pi * 3000 * t)
+    out = lowpass_view(750.0)(low + high, rate)
+    assert np.sqrt(((out - low) ** 2).mean()) < 0.05
+    assert VIEWS["far_750"] is not None
+    # Layout-preserving on (channels, n), and zero-phase: no shift of an onset.
+    stereo = np.stack([low + high, low + high])
+    assert lowpass_view(750.0)(stereo, rate).shape == stereo.shape
+
+
+def test_views_take_the_sample_rate_and_reversal_ignores_it() -> None:
+    from ava.audio.perceive import VIEWS
+
+    wave = np.array([[1.0, 2.0, 3.0]])
+    assert VIEWS["reverse"](wave, 8000).tolist() == [[3.0, 2.0, 1.0]]
+    assert VIEWS["near"](wave, 8000).tolist() == wave.tolist()

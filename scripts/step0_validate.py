@@ -2,7 +2,7 @@
 
 The loop is not written until this passes. Three checks, per the plan:
 
-  0-1 sign      the known-good example scores p_far > 0.5 and p_near > 0.5
+  0-1 sign      the known-good example reads as its prompt in both views
   0-2 separation deliberately broken examples (generation sigma 1.0 / 6.0)
                 score clearly below the good one
   0-3 eye       a human compares the rendered sheet against the J ranking
@@ -13,9 +13,9 @@ Why sigma 1.0 and 6.0 break the image (view_hybrid.py's own note: "small sigma
 => low freq is easier to see, larger sigma => high freq easier to see"):
 
   sigma=1.0  the high-pass band is squeezed to the very finest detail, so
-             prompt_high cannot be rendered  -> p_near should collapse
+             the high prompt cannot be rendered -> p[high] should collapse
   sigma=6.0  the low-pass band is squeezed to the very coarsest structure, so
-             prompt_low cannot be rendered   -> p_far should collapse
+             the low prompt cannot be rendered  -> p[low] should collapse
 
 The evaluation blur stays fixed at ava.spec.SIGMA in every case: the viewing
 distance of the human is a constant, not a function of how the image was made.
@@ -38,16 +38,21 @@ from typing import Any
 
 import torch
 from torchvision.utils import save_image
+from visual_anagrams.views.view_hybrid import HybridHighPassView, HybridLowPassView
 
 from ava.image.engine import Engine, save_sample
-from ava.image.judge import ClipBlipJudge, load_image
-from ava.spec import SIGMA, CandidateSpec
+from ava.image.judge import ClipBlipJudge, build_verdict, load_image, to_pil
+from ava.image.perceive import far_view, far_view_resize, near_view
+from ava.image.tasks import get_task
+from ava.image.views import ViewSet
+from ava.spec import KERNEL_SIZE, SIGMA, CandidateSpec
 
 # The known-good example already in results/hybrid_smoke, reproduced here so
 # the sigma sweep is otherwise identical to it.
 REFERENCE_SPEC = CandidateSpec(
-    prompt_low="a painting of a panda",
-    prompt_high="a painting of a flower arrangement",
+    task="hybrid",
+    prompts=("a panda", "a flower arrangement"),
+    style="a painting of",
     seed=0,
     guidance_scale=10.0,
     num_inference_steps=30,
@@ -55,11 +60,12 @@ REFERENCE_SPEC = CandidateSpec(
 
 # (label, generation sigma, expectation)
 CASES: list[tuple[str, float, str]] = [
-    ("sigma_1.0", 1.0, "high-pass band too narrow; expect p_near to collapse"),
-    ("sigma_2.0", SIGMA, "known-good setting; expect both above 0.5"),
-    ("sigma_6.0", 6.0, "low-pass band too narrow; expect p_far to collapse"),
+    ("sigma_1.0", 1.0, "high-pass band too narrow; expect p[high] to collapse"),
+    ("sigma_2.0", SIGMA, "known-good setting; expect both views to hold"),
+    ("sigma_6.0", 6.0, "low-pass band too narrow; expect p[low] to collapse"),
 ]
 
+# Two far-view implementations, so the gate does not depend on one blur.
 FAR_MODES = ("blur", "resize")
 
 
@@ -80,6 +86,19 @@ class Step0Paths:
         return self.root / "summary.json"
 
 
+def hybrid_viewset_with_sigma(sigma: float) -> ViewSet:
+    """The hybrid task's views with a deliberately different generation sigma.
+
+    Only this gate does this; `ViewSet.build` always uses SIGMA.
+    """
+    task = get_task("hybrid")
+    views = [
+        HybridLowPassView(sigma=sigma, kernel_size=KERNEL_SIZE),
+        HybridHighPassView(sigma=sigma, kernel_size=KERNEL_SIZE),
+    ]
+    return ViewSet(task=task, views=views, seed=0)
+
+
 def generate_cases(paths: Step0Paths, device: str) -> dict[str, Path]:
     """Generate one image per sigma, reusing any that already exist."""
     wanted = {label: paths.images / label / "sample_256.png" for label, _, _ in CASES}
@@ -91,28 +110,46 @@ def generate_cases(paths: Step0Paths, device: str) -> dict[str, Path]:
     engine = Engine(device=device)
     for label, sigma in todo:
         print(f"[generate] {label} (generation sigma={sigma})")
-        _, img_256 = engine.generate(REFERENCE_SPEC, sigma=sigma)
+        _, img_256 = engine.generate(REFERENCE_SPEC, hybrid_viewset_with_sigma(sigma))
         save_sample(img_256, paths.images / label)
     return wanted
+
+
+def score_with_far_mode(
+    judge: ClipBlipJudge, img: torch.Tensor, viewset: ViewSet, far_mode: str
+) -> tuple[Any, list[torch.Tensor]]:
+    """Score the hybrid under one far-view implementation; returns (verdict, views)."""
+    far = far_view(img) if far_mode == "blur" else far_view_resize(img)
+    views = [far, near_view(img)]
+    pils = [to_pil(v) for v in views]
+    s = (
+        judge.image_embeddings(pils)
+        @ judge.text_embeddings(REFERENCE_SPEC.full_prompts).T
+    ).cpu()
+    captions = [judge.caption(p) for p in pils]
+    verdict = build_verdict(
+        REFERENCE_SPEC, viewset, s, judge.logit_scale, captions, {"far_mode": far_mode}
+    )
+    return verdict, views
 
 
 def evaluate_cases(
     images: dict[str, Path], paths: Step0Paths, device: str
 ) -> list[dict[str, Any]]:
     """Score every image under every far-view implementation."""
+    judge = ClipBlipJudge(device=device)
+    viewset = ViewSet.build(get_task("hybrid"))
     rows: list[dict[str, Any]] = []
     for far_mode in FAR_MODES:
-        judge = ClipBlipJudge(device=device, far_mode=far_mode)
         for label, gen_sigma, expectation in CASES:
             img = load_image(images[label])
-            verdict = judge.evaluate(img, REFERENCE_SPEC)
+            verdict, views = score_with_far_mode(judge, img, viewset, far_mode)
 
             # Persist the exact views that were scored, so render_step0.py can
             # composite the sheet without recomputing anything.
-            far, _ = judge.views(img)
             far_path = paths.images / label / f"far_{far_mode}.png"
             far_path.parent.mkdir(parents=True, exist_ok=True)
-            save_image(far, far_path, padding=0)
+            save_image(views[0], far_path, padding=0)
 
             row = json.loads(verdict.to_json())
             row["case"] = label
@@ -121,18 +158,14 @@ def evaluate_cases(
             row["far_mode"] = far_mode
             row["image_path"] = str(images[label])
             row["far_image_path"] = str(far_path)
-            row["prompt_low"] = REFERENCE_SPEC.full_low
-            row["prompt_high"] = REFERENCE_SPEC.full_high
+            row["prompts"] = REFERENCE_SPEC.full_prompts
             rows.append(row)
             print(
-                f"[{far_mode:6s} {label}] p_far={verdict.p_far:.4f} "
-                f"p_near={verdict.p_near:.4f} J={verdict.j:.4f} "
-                f"({verdict.diagnose()})"
+                f"[{far_mode:6s} {label}] p_low={verdict.p[0]:.4f} "
+                f"p_high={verdict.p[1]:.4f} J={verdict.j:.4f} ({verdict.diagnose()})"
             )
-            print(f"         far : {verdict.caption_far!r}")
-            print(f"         near: {verdict.caption_near!r}")
-        del judge
-        torch.cuda.empty_cache()
+            for slot, caption in zip(verdict.slots, verdict.captions, strict=True):
+                print(f"         {slot:4s}: {caption!r}")
 
     with paths.scores.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -148,7 +181,7 @@ def check_gate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         good = by_case["sigma_2.0"]
         broken = [by_case["sigma_1.0"], by_case["sigma_6.0"]]
 
-        sign_ok = bool(good["p_far"] > 0.5 and good["p_near"] > 0.5)
+        sign_ok = all(good["holds"])
         # Separation: the good case must outscore both broken ones on J.
         margin = float(good["j"]) - max(float(b["j"]) for b in broken)
         separation_ok = margin > 0.0
@@ -157,11 +190,8 @@ def check_gate(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "sign_ok": sign_ok,
             "separation_ok": separation_ok,
             "j_margin": margin,
-            "good": {k: good[k] for k in ("p_far", "p_near", "j")},
-            "broken": {
-                str(b["case"]): {k: b[k] for k in ("p_far", "p_near", "j")}
-                for b in broken
-            },
+            "good": {k: good[k] for k in ("p", "j")},
+            "broken": {str(b["case"]): {k: b[k] for k in ("p", "j")} for b in broken},
         }
 
     modes = summary["far_modes"]
