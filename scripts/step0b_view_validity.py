@@ -36,7 +36,14 @@ once a control pinned what 'unchanged' looked like.
 It separates the two ways this can fail: the encoder not being equivariant,
 versus the decoder undoing it.
 
-    .venv/bin/python -m scripts.step0b_view_validity
+    .venv/bin/python -m scripts.step0b_view_validity                    # Stable Audio
+    .venv/bin/python -m scripts.step0b_view_validity --codec audioldm2   # AudioLDM 2
+
+The two codecs are not expected to behave alike. Stable Audio's is a stack of
+1D convolutions on the waveform, and the flip only approximates reversal
+there. AudioLDM 2's works on a log-mel spectrogram, where reversal is exact up
+to the frame grid (`ava.audio.mel`), so what it measures is only how far the
+2D VAE is from commuting with a flip.
 """
 
 from __future__ import annotations
@@ -49,9 +56,10 @@ from typing import Any
 import numpy as np
 import torch
 
-from ava.audio.codec import LatentCodec, StableAudioCodec
+from ava.audio.codec import CODECS, LatentCodec
 from ava.audio.features import log_mel_distance
 from ava.audio.perceive import reverse_view
+from ava.audio.resample import resample
 from ava.audio.signals import percussive_burst, rising_chirp, symmetric_burst
 from ava.audio.wavfile import write_wav
 
@@ -71,11 +79,13 @@ def probe_signals(sample_rate: int) -> dict[str, np.ndarray]:
     }
 
 
-def load_generated(directory: Path) -> dict[str, np.ndarray]:
-    """Clips written by scripts.smoke_stable_audio, if they are there.
+def load_generated(directory: Path, sample_rate: int) -> dict[str, np.ndarray]:
+    """Clips written by a smoke script, if they are there, at the codec's rate.
 
     In-distribution audio matters: a codec asked to reconstruct a synthetic
-    chirp is being asked something it was never trained for.
+    chirp is being asked something it was never trained for. The clips come
+    from whichever generator made them and are resampled here, so Stable
+    Audio's 44.1 kHz output can also probe AudioLDM 2's 16 kHz codec.
     """
     manifest = directory / "run.json"
     if not manifest.is_file():
@@ -87,9 +97,11 @@ def load_generated(directory: Path) -> dict[str, np.ndarray]:
     for index, clip in enumerate(json.loads(manifest.read_text())["clips"]):
         with wave_module.open(clip["path"], "rb") as handle:
             channels = handle.getnchannels()
+            rate = handle.getframerate()
             raw = handle.readframes(handle.getnframes())
         data = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32767.0
-        out[f"generated_{index:02d}"] = data.reshape(-1, channels).T
+        clip_wave = data.reshape(-1, channels).T
+        out[f"generated_{index:02d}"] = resample(clip_wave, rate, sample_rate)
     return out
 
 
@@ -169,17 +181,42 @@ def run(out_dir: Path, codec: LatentCodec, signals: dict[str, np.ndarray]) -> Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("results/step0b"))
     parser.add_argument(
-        "--generated", type=Path, default=Path("results/smoke_stable_audio")
+        "--codec",
+        choices=sorted(CODECS),
+        default="stable_audio",
+        help="which autoencoder to measure",
     )
-    parser.add_argument("--model-id", default="stabilityai/stable-audio-open-1.0")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="default results/step0b (stable_audio) or results/step0b_<codec>",
+    )
+    parser.add_argument(
+        "--generated",
+        type=Path,
+        default=None,
+        help="default results/smoke_<codec>, the matching smoke script's clips",
+    )
+    parser.add_argument("--model-id", default=None, help="default: the codec's own")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
-    codec = StableAudioCodec(model_id=args.model_id, device=args.device)
-    signals = {**probe_signals(codec.sample_rate), **load_generated(args.generated)}
-    path = run(args.out, codec, signals)
+    codec_cls = CODECS[args.codec]
+    codec: LatentCodec = (
+        codec_cls(model_id=args.model_id, device=args.device)
+        if args.model_id
+        else codec_cls(device=args.device)
+    )
+    suffix = "" if args.codec == "stable_audio" else f"_{args.codec}"
+    out_dir = args.out or Path(f"results/step0b{suffix}")
+    generated = args.generated or Path(f"results/smoke_{args.codec}")
+    signals = {
+        **probe_signals(codec.sample_rate),
+        **load_generated(generated, codec.sample_rate),
+    }
+    path = run(out_dir, codec, signals)
 
     result = json.loads(path.read_text(encoding="utf-8"))
     print(f"wrote {path}\n")
