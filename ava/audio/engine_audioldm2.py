@@ -47,7 +47,7 @@ import numpy as np
 import torch
 
 from ava.audio.bands import LowpassProjector
-from ava.audio.engine import anagram_epsilon, flip_window
+from ava.audio.engine import TIME_REVERSE_VIEW, LatentView, anagram_epsilon
 from ava.audio.mel import AUDIOLDM2_MEL, MelConfig, mel_frames
 from ava.audio.spec import AudioCandidateSpec
 
@@ -253,16 +253,25 @@ class _AudioLDM2Sampler:
 
 
 class AudioLDM2Engine(_AudioLDM2Sampler):
-    """The reversal anagram: slot 0 is heard forwards, slot 1 backwards."""
+    """Visual Anagrams on the mel latent: slot 0 as is, slot 1 under `view`.
+
+    The view defaults to time reversal; the jigsaw is the other one.
+    """
+
+    def __init__(self, view: LatentView = TIME_REVERSE_VIEW, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.view = view
 
     def _branch_input(self, latents: torch.Tensor, frames: int) -> torch.Tensor:
-        flipped = flip_window(latents, frames, TIME_DIM)
-        return torch.cat([latents, latents, flipped, flipped])
+        viewed = self.view.apply(latents, frames, TIME_DIM)
+        return torch.cat([latents, latents, viewed, viewed])
 
     def _combine(
         self, prediction: torch.Tensor, guidance_scale: float, frames: int
     ) -> torch.Tensor:
-        return anagram_epsilon(prediction, guidance_scale, frames, TIME_DIM)
+        return anagram_epsilon(
+            prediction, guidance_scale, frames, TIME_DIM, view=self.view
+        )
 
 
 class AudioLDM2HybridEngine(_AudioLDM2Sampler):

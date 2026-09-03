@@ -28,11 +28,18 @@ call to the transformer yields both branches and their guidance terms.
 """
 
 import math
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 import torch
 
+from ava.audio.permute import (
+    JIGSAW_BLOCKS,
+    JIGSAW_PERM,
+    block_slices,
+    inverse_permutation,
+)
 from ava.audio.spec import AudioCandidateSpec
 
 MODEL_ID = "stabilityai/stable-audio-open-1.0"
@@ -56,16 +63,94 @@ def flip_window(latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tenso
     return out
 
 
+def permute_blocks(
+    latent: torch.Tensor, frames: int, perm: tuple[int, ...], dim: int = -1
+) -> torch.Tensor:
+    """Cut the first `frames` along `dim` into equal blocks and reorder them.
+
+    Position i of the result holds source block `perm[i]`. Frames that do not
+    divide evenly, and everything past `frames`, stay where they are -- the
+    same rule `ava.audio.permute.block_slices` applies to the waveform.
+    """
+    axis = dim % latent.ndim
+    slices = block_slices(frames, len(perm))
+    out = latent.clone()
+    for position, source in enumerate(perm):
+        target: list[slice] = [slice(None)] * latent.ndim
+        origin: list[slice] = [slice(None)] * latent.ndim
+        target[axis], origin[axis] = slices[position], slices[source]
+        out[tuple(target)] = latent[tuple(origin)]
+    return out
+
+
+class LatentView(Protocol):
+    """A linear, invertible rearrangement of a latent's time axis.
+
+    Visual Anagrams' condition: the view must be orthogonal so the noise stays
+    Gaussian; permutations of frames are, and a flip is one of them.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    def apply(
+        self, latent: torch.Tensor, frames: int, dim: int = -1
+    ) -> torch.Tensor: ...
+
+    def invert(
+        self, latent: torch.Tensor, frames: int, dim: int = -1
+    ) -> torch.Tensor: ...
+
+
+@dataclass(frozen=True)
+class TimeReverse:
+    """Play it backwards. An involution: its own inverse."""
+
+    name: str = "time_reverse"
+
+    def apply(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return flip_window(latent, frames, dim)
+
+    def invert(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return flip_window(latent, frames, dim)
+
+
+@dataclass(frozen=True)
+class BlockPermute:
+    """Cut time into equal blocks and play them in another order."""
+
+    perm: tuple[int, ...] = JIGSAW_PERM
+    name: str = f"jigsaw_{JIGSAW_BLOCKS}"
+
+    def apply(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return permute_blocks(latent, frames, self.perm, dim)
+
+    def invert(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return permute_blocks(latent, frames, inverse_permutation(self.perm), dim)
+
+
+TIME_REVERSE_VIEW = TimeReverse()
+JIGSAW_VIEW = BlockPermute()
+LATENT_VIEWS: dict[str, LatentView] = {
+    TIME_REVERSE_VIEW.name: TIME_REVERSE_VIEW,
+    JIGSAW_VIEW.name: JIGSAW_VIEW,
+}
+
+
 def anagram_epsilon(
-    prediction: torch.Tensor, guidance_scale: float, frames: int, dim: int = -1
+    prediction: torch.Tensor,
+    guidance_scale: float,
+    frames: int,
+    dim: int = -1,
+    view: LatentView = TIME_REVERSE_VIEW,
 ) -> torch.Tensor:
     """Fold the batch-of-4 transformer output into a single epsilon.
 
-    Rows arrive as [uncond, forward, uncond, reverse]: guidance is applied
-    within each branch, then the two are averaged. The reverse branch predicted
-    noise for a flipped latent, so its prediction is flipped back first --
-    without that the two branches would be added in different time frames and
-    the result would be neither sound.
+    Rows arrive as [uncond, forward, uncond, viewed]: guidance is applied
+    within each branch, then the two are averaged. The second branch predicted
+    noise for a transformed latent, so its prediction is transformed back
+    first -- without that the two branches would be added in different time
+    frames and the result would be neither sound.
 
     Split out from the sampling loop so the arithmetic can be checked on
     hand-written tensors, without a 4 GB model and a GPU. `dim` is the time
@@ -73,8 +158,8 @@ def anagram_epsilon(
     """
     uncond_f, cond_f, uncond_r, cond_r = prediction.chunk(4)
     eps_forward = uncond_f + guidance_scale * (cond_f - uncond_f)
-    eps_reverse = uncond_r + guidance_scale * (cond_r - uncond_r)
-    return 0.5 * (eps_forward + flip_window(eps_reverse, frames, dim))
+    eps_viewed = uncond_r + guidance_scale * (cond_r - uncond_r)
+    return 0.5 * (eps_forward + view.invert(eps_viewed, frames, dim))
 
 
 class AudioAnagramEngine:
@@ -89,9 +174,11 @@ class AudioAnagramEngine:
         model_id: str = MODEL_ID,
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
+        view: LatentView = TIME_REVERSE_VIEW,
     ) -> None:
         self.model_id = model_id
         self.device = device
+        self.view = view
         # diffusers' randn_tensor inspects `device.type`, so the pipeline
         # helpers need a torch.device rather than the string used elsewhere.
         self.torch_device = torch.device(device)
@@ -208,8 +295,8 @@ class AudioAnagramEngine:
         frames = self.latent_frames(spec.duration_s)
 
         for t in timesteps:
-            flipped = flip_window(latents, frames)
-            model_input = torch.cat([latents, latents, flipped, flipped])
+            viewed = self.view.apply(latents, frames)
+            model_input = torch.cat([latents, latents, viewed, viewed])
             model_input = pipe.scheduler.scale_model_input(model_input, t)
 
             prediction = pipe.transformer(
@@ -221,9 +308,16 @@ class AudioAnagramEngine:
                 return_dict=False,
             )[0]
 
-            eps = anagram_epsilon(prediction, spec.guidance_scale, frames)
+            eps = anagram_epsilon(
+                prediction, spec.guidance_scale, frames, view=self.view
+            )
             latents = pipe.scheduler.step(eps, t, latents).prev_sample
 
         audio = pipe.vae.decode(latents).sample
-        end_sample = int(spec.duration_s * self.sample_rate)
+        # The whole span the view acted on, not the requested duration: the
+        # occupied frames cover a little more than `duration_s`, and cropping
+        # to the request would shift the viewed branch by the difference (15 ms
+        # at 5 s). A listener's view cuts the waveform at the same instants
+        # the latent view cut the frames only if the two have the same length.
+        end_sample = frames * self.downsample_ratio
         return audio[0, :, :end_sample].float().cpu().numpy()

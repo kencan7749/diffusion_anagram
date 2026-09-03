@@ -38,6 +38,13 @@ class LatentCodec(Protocol):
     @property
     def sample_rate(self) -> int: ...
 
+    # The latent's time axis, and the waveform samples one frame stands for.
+    @property
+    def time_dim(self) -> int: ...
+
+    @property
+    def samples_per_frame(self) -> int: ...
+
     def encode(self, wave: np.ndarray) -> torch.Tensor: ...
 
     def decode(self, latent: torch.Tensor) -> np.ndarray: ...
@@ -90,6 +97,15 @@ class StableAudioCodec:
     def channels(self) -> int:
         self._ensure_vae()
         return int(self._vae.config.audio_channels)
+
+    @property
+    def time_dim(self) -> int:
+        return -1
+
+    @property
+    def samples_per_frame(self) -> int:
+        self._ensure_vae()
+        return int(np.prod(self._vae.config.downsampling_ratios))
 
     def _to_batch(self, wave: np.ndarray) -> torch.Tensor:
         """(n,) or (channels, n) -> (1, channels, n), duplicating mono if needed."""
@@ -173,6 +189,14 @@ class AudioLDM2Codec:
     @property
     def sample_rate(self) -> int:
         return self.mel.sample_rate
+
+    @property
+    def time_dim(self) -> int:
+        return -2
+
+    @property
+    def samples_per_frame(self) -> int:
+        return self.mel.samples_per_latent_frame
 
     @torch.no_grad()
     def encode(self, wave: np.ndarray) -> torch.Tensor:

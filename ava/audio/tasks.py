@@ -42,7 +42,22 @@ FREQ_HYBRID_750 = IllusionTask(
     "low-pass on AudioLDM 2's latent (Step 0c for the view)",
 )
 
-AUDIO_TASKS: tuple[IllusionTask, ...] = (TIME_REVERSE, FREQ_HYBRID_750)
+# The time jigsaw: Visual Anagrams' jigsaw with time in place of the plane.
+# `whole` is the recording as made; `shuffled` is the same recording cut into
+# four equal blocks and spliced in the fixed order of ava.audio.permute
+# (seed 0, a derangement). Not symmetric. The permutation is a constant, not
+# drawn per run, so `randomised` stays False; runs still record it.
+TIME_JIGSAW_4 = IllusionTask(
+    name="time_jigsaw_4",
+    paper=AUDIO,
+    slots=(Slot("whole", SUBJECT), Slot("shuffled", SUBJECT)),
+    view_names=("whole", "jigsaw_4"),
+    reduction="mean",
+    citation="ava/audio/engine.py BlockPermute: Visual Anagrams' sampler with a "
+    "block permutation of time as the view (Step 0b --view jigsaw_4)",
+)
+
+AUDIO_TASKS: tuple[IllusionTask, ...] = (TIME_REVERSE, FREQ_HYBRID_750, TIME_JIGSAW_4)
 
 for _task in AUDIO_TASKS:
     register_task(_task)

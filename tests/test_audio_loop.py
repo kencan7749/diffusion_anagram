@@ -467,3 +467,60 @@ def test_hybrid_run_records_its_projector_and_writes_near_and_far(
     assert all(r["task"] == "freq_hybrid_750" for r in rows)
     assert "| near prompt | far prompt |" in (paths.root / "audition.md").read_text()
     conn.close()
+
+
+# ---- the time jigsaw as a task ---------------------------------------------------
+
+
+def test_jigsaw_task_is_registered_with_its_views() -> None:
+    from ava.audio.perceive import views_of
+    from ava.audio.tasks import TIME_JIGSAW_4
+
+    task = get_task("time_jigsaw_4")
+    assert task is TIME_JIGSAW_4
+    assert task.view_names == ("whole", "jigsaw_4")
+    assert task.reduction == "mean"
+    assert len(views_of(task)) == 2
+
+
+def test_jigsaw_run_records_the_permutation_and_writes_both_views(
+    tmp_path: Path,
+) -> None:
+    from ava.audio.loop import AudioLoopConfig, run_loop
+    from ava.audio.permute import JIGSAW_PERM
+    from ava.audio.tasks import TIME_JIGSAW_4
+    from ava.audio.vocab import JIGSAW_PROMPTS, seed_jigsaw_vocab
+
+    conn = connect(tmp_path / "runs" / "vocab.db")
+    assert seed_jigsaw_vocab(conn) == len(JIGSAW_PROMPTS) + 1
+    assert seed_jigsaw_vocab(conn) == 0
+    paths = RunPaths(tmp_path / "runs" / "j")
+    config = AudioLoopConfig(
+        run_id="j", rounds=1, k=2, task=TIME_JIGSAW_4.name, proposer="uniform"
+    )
+    assert config.view_params == {
+        "jigsaw_4": {"blocks": 4, "seed": 0, "perm": list(JIGSAW_PERM)}
+    }
+    proposer = UniformProposer(
+        conn,
+        np.random.default_rng(0),
+        tasks=[TIME_JIGSAW_4.name],
+        screening_seed=0,
+        guidance_scale=7.0,
+        num_inference_steps=20,
+    )
+    run_loop(config, paths, conn, proposer, FakeAudioGenerator(), FakeClapJudge())
+    assert "perm:" in paths.config.read_text()
+    rows = rows_of(paths)
+    assert all(set(r["wav_paths"]) == {"whole", "jigsaw_4"} for r in rows)
+    conn.close()
+
+
+def test_jigsaw_engine_dispatch_carries_the_view() -> None:
+    from ava.audio.engine import JIGSAW_VIEW
+    from ava.audio.loop import build_engine
+
+    engine = build_engine("stable_audio", "cpu", task="time_jigsaw_4")
+    assert engine.view is JIGSAW_VIEW  # type: ignore[attr-defined]
+    engine = build_engine("audioldm2", "cpu", task="time_jigsaw_4")
+    assert engine.view is JIGSAW_VIEW  # type: ignore[attr-defined]

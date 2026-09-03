@@ -15,6 +15,7 @@ from collections.abc import Callable
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
+from ava.audio.permute import JIGSAW_BLOCKS, JIGSAW_PERM, JIGSAW_SEED, block_slices
 from ava.image.tasks import IllusionTask
 
 
@@ -65,6 +66,36 @@ def lowpass_view(cutoff_hz: float) -> View:
     return view
 
 
+def permute_view(perm: tuple[int, ...]) -> View:
+    """The recording cut into equal blocks and spliced in another order.
+
+    Hard cuts, no crossfade: the judge must hear what the latent view did,
+    and a crossfade would be a second, unmeasured operation. Position i of
+    the result is source block `perm[i]`, with the same remainder rule as
+    the latent side, so the two cut at the same instants when the waveform
+    is exactly the decoded span of the latent (which the engines return).
+    """
+
+    def view(wave: np.ndarray, sample_rate: int) -> np.ndarray:
+        slices = block_slices(wave.shape[-1], len(perm))
+        out = wave.copy()
+        for position, source in enumerate(perm):
+            out[..., slices[position]] = wave[..., slices[source]]
+        return out
+
+    return view
+
+
+# Parameters of the views that have any, for a run's config.yaml.
+VIEW_PARAMS: dict[str, dict[str, object]] = {
+    f"jigsaw_{JIGSAW_BLOCKS}": {
+        "blocks": JIGSAW_BLOCKS,
+        "seed": JIGSAW_SEED,
+        "perm": list(JIGSAW_PERM),
+    },
+}
+
+
 def _identity(wave: np.ndarray, sample_rate: int) -> np.ndarray:
     return forward_view(wave)
 
@@ -79,6 +110,8 @@ VIEWS: dict[str, View] = {
     "reverse": _reversed,
     "near": _identity,
     "far_750": lowpass_view(750.0),
+    "whole": _identity,
+    f"jigsaw_{JIGSAW_BLOCKS}": permute_view(JIGSAW_PERM),
 }
 
 

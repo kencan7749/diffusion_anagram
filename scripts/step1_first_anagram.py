@@ -35,7 +35,7 @@ from ava.audio.judge import ClapJudge
 from ava.audio.loop import AUDIO_TASK_NAMES, BACKENDS, AudioGenerator, build_engine
 from ava.audio.perceive import perceive
 from ava.audio.spec import AudioCandidateSpec
-from ava.audio.tasks import FREQ_HYBRID_750, TIME_REVERSE
+from ava.audio.tasks import FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import IllusionTask, get_task
 from ava.metric import scores_to_probs
@@ -65,6 +65,22 @@ PROMPT_PAIRS: dict[str, list[tuple[str, str]]] = {
         ("rain falling steadily on a roof", "distant thunder rumbling"),
         ("a crowd applauding in a hall", "a bass drum beating slowly"),
         ("food sizzling in a frying pan", "a truck engine idling"),
+    ],
+    # (whole, shuffled): two orders of events, so that cutting the first into
+    # four blocks and re-splicing them can plausibly be the second.
+    TIME_JIGSAW_4.name: [
+        (
+            "footsteps approaching, then a door closing",
+            "a door closing, then footsteps walking away",
+        ),
+        (
+            "a drum roll building up to a cymbal crash",
+            "a cymbal crash followed by a drum roll",
+        ),
+        (
+            "a car starting up and driving off",
+            "a car arriving and the engine switching off",
+        ),
     ],
 }
 

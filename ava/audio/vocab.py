@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from ava.audio.tasks import FREQ_HYBRID_750, TIME_REVERSE
+from ava.audio.tasks import FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
 from ava.image.tasks import STYLE, SUBJECT
 from ava.vocab import UNIFORM_PRIOR, add_arm
 
@@ -138,6 +138,41 @@ def seed_hybrid_vocab(conn: sqlite3.Connection) -> int:
     task = FREQ_HYBRID_750.name
     added = 0
     for word in HYBRID_TEXTURES + HYBRID_LOW_SOUNDS:
+        added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    for style in STYLES:
+        added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    return added
+
+
+# The time jigsaw's pool: sounds made of events in an order, so that cutting
+# and re-splicing them changes what happened. A stationary texture shuffled is
+# the same texture (the reason the reversal failed on AudioLDM 2), so none of
+# those are here. Both slots draw from this pool.
+JIGSAW_PROMPTS: tuple[str, ...] = (
+    "footsteps approaching, then a door closing",
+    "a door closing, then footsteps walking away",
+    "a phone ringing, then someone picking up",
+    "a car starting up and driving off",
+    "a car arriving and the engine switching off",
+    "a drum roll building up to a cymbal crash",
+    "a cymbal crash followed by a drum roll",
+    "a dog barking three times",
+    "a clock ticking, then an alarm going off",
+    "a glass filling up, then a sip",
+    "a knock on the door, then a creak as it opens",
+    "a match struck, then a candle blown out",
+    "a person counting from one to five",
+    "morse code being tapped out",
+    "a coin dropped, spinning, then settling",
+    "a bouncing ball coming to rest",
+)
+
+
+def seed_jigsaw_vocab(conn: sqlite3.Connection) -> int:
+    """Register the jigsaw pool as arms of `time_jigsaw_4`. Idempotent."""
+    task = TIME_JIGSAW_4.name
+    added = 0
+    for word in JIGSAW_PROMPTS:
         added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
     for style in STYLES:
         added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)

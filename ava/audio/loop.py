@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import yaml
 
-from ava.audio.perceive import perceive
+from ava.audio.perceive import VIEW_PARAMS, perceive
 from ava.audio.spec import (
     DURATION_S,
     GUIDANCE_SCALE,
@@ -41,8 +41,8 @@ from ava.audio.spec import (
     NUM_INFERENCE_STEPS,
     AudioCandidateSpec,
 )
-from ava.audio.tasks import AUDIO_TASKS, FREQ_HYBRID_750, TIME_REVERSE
-from ava.audio.vocab import seed_audio_vocab, seed_hybrid_vocab
+from ava.audio.tasks import AUDIO_TASKS, FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
+from ava.audio.vocab import seed_audio_vocab, seed_hybrid_vocab, seed_jigsaw_vocab
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import get_task
 from ava.loop import (
@@ -116,12 +116,21 @@ class AudioLoopConfig:
     # It is data, not code, so a run names the file and records its digest.
     projector: str | None = None
     projector_md5: str | None = None
+    # Parameters of the task's views that have any (the jigsaw's permutation),
+    # filled in from the registry so the run says which cut it used.
+    view_params: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.task not in AUDIO_TASK_NAMES:
             raise ValueError(f"task must be one of {AUDIO_TASK_NAMES}, got {self.task}")
         if self.backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend}")
+        if not self.view_params:
+            self.view_params = {
+                name: dict(VIEW_PARAMS[name])
+                for name in get_task(self.task).view_names
+                if name in VIEW_PARAMS
+            }
         if self.supply not in SUPPLIES:
             raise ValueError(f"supply must be one of {SUPPLIES}, got {self.supply}")
         if self.proposer not in PROPOSERS:
@@ -156,6 +165,7 @@ BACKENDS: tuple[str, ...] = ("stable_audio", "audioldm2")
 TASK_BACKENDS: dict[str, tuple[str, ...]] = {
     TIME_REVERSE.name: BACKENDS,
     FREQ_HYBRID_750.name: ("audioldm2",),
+    TIME_JIGSAW_4.name: BACKENDS,
 }
 
 
@@ -196,6 +206,9 @@ def build_engine(
                 f"{task} expects a 750 Hz projector, {projector} is {fitted.cutoff_hz}"
             )
         return AudioLDM2HybridEngine(projector=fitted, **kwargs)
+    from ava.audio.engine import JIGSAW_VIEW, TIME_REVERSE_VIEW
+
+    kwargs["view"] = JIGSAW_VIEW if task == TIME_JIGSAW_4.name else TIME_REVERSE_VIEW
     if backend == "audioldm2":
         from ava.audio.engine_audioldm2 import AudioLDM2Engine
 
@@ -576,6 +589,10 @@ def main(argv: list[str] | None = None) -> None:
         added = seed_hybrid_vocab(conn)
         if added:
             print(f"[vocab] seeded {added} hybrid arms")
+    if config.task == TIME_JIGSAW_4.name:
+        added = seed_jigsaw_vocab(conn)
+        if added:
+            print(f"[vocab] seeded {added} jigsaw arms")
     paths = RunPaths(args.runs_dir / args.run_id)
 
     from ava.audio.judge import ClapJudge
