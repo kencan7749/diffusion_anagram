@@ -38,21 +38,26 @@ from ava.audio.spec import AudioCandidateSpec
 MODEL_ID = "stabilityai/stable-audio-open-1.0"
 
 
-def flip_window(latent: torch.Tensor, frames: int) -> torch.Tensor:
-    """Reverse the first `frames` of a (B, C, T) latent, leaving the rest.
+def flip_window(latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+    """Reverse the first `frames` along the latent's time axis, leaving the rest.
 
-    Reversing all T would relocate the audio rather than reverse it, because
-    the occupied region is a prefix of a much longer latent.
+    Reversing the whole axis would relocate the audio rather than reverse it
+    when the occupied region is a prefix of a much longer latent, as it is for
+    Stable Audio. `dim` names the time axis: the last one for Stable Audio's
+    (B, C, T), the second to last for AudioLDM 2's (B, C, T, mel).
     """
-    if frames >= latent.shape[-1]:
-        return torch.flip(latent, dims=[-1])
+    if frames >= latent.shape[dim]:
+        return torch.flip(latent, dims=[dim])
+    index: list[slice] = [slice(None)] * latent.ndim
+    index[dim] = slice(0, frames)
+    window = tuple(index)
     out = latent.clone()
-    out[..., :frames] = torch.flip(latent[..., :frames], dims=[-1])
+    out[window] = torch.flip(latent[window], dims=[dim])
     return out
 
 
 def anagram_epsilon(
-    prediction: torch.Tensor, guidance_scale: float, frames: int
+    prediction: torch.Tensor, guidance_scale: float, frames: int, dim: int = -1
 ) -> torch.Tensor:
     """Fold the batch-of-4 transformer output into a single epsilon.
 
@@ -63,12 +68,13 @@ def anagram_epsilon(
     the result would be neither sound.
 
     Split out from the sampling loop so the arithmetic can be checked on
-    hand-written tensors, without a 4 GB model and a GPU.
+    hand-written tensors, without a 4 GB model and a GPU. `dim` is the time
+    axis, as for `flip_window`; the AudioLDM 2 engine shares this function.
     """
     uncond_f, cond_f, uncond_r, cond_r = prediction.chunk(4)
     eps_forward = uncond_f + guidance_scale * (cond_f - uncond_f)
     eps_reverse = uncond_r + guidance_scale * (cond_r - uncond_r)
-    return 0.5 * (eps_forward + flip_window(eps_reverse, frames))
+    return 0.5 * (eps_forward + flip_window(eps_reverse, frames, dim))
 
 
 class AudioAnagramEngine:

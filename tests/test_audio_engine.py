@@ -93,3 +93,34 @@ def test_spec_uid_distinguishes_the_two_prompt_orders() -> None:
     b = AudioCandidateSpec("a swell that stops", "a hit that decays")
     assert a.uid() != b.uid()
     assert a.prompts == ["a hit that decays", "a swell that stops"]
+
+
+# ---- the time axis need not be the last one (AudioLDM 2: (B, C, T, mel)) ----
+
+
+def _mel_latent(rows: list[list[float]]) -> torch.Tensor:
+    """(1, 1, T, mel) latent from rows, one per time frame."""
+    return torch.tensor(rows).reshape(1, 1, len(rows), -1)
+
+
+def test_flip_window_on_the_second_to_last_axis_leaves_mel_bins_alone() -> None:
+    latent = _mel_latent([[1, 10], [2, 20], [3, 30], [9, 90]])
+    out = flip_window(latent, frames=3, dim=-2)
+    assert out[0, 0].tolist() == [[3, 30], [2, 20], [1, 10], [9, 90]]
+    out = flip_window(latent, frames=4, dim=-2)
+    assert out[0, 0].tolist() == [[9, 90], [3, 30], [2, 20], [1, 10]]
+
+
+def test_anagram_epsilon_flips_the_reverse_branch_along_the_given_axis() -> None:
+    forward = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
+    zeros = [[0.0, 0.0]] * 3
+    prediction = torch.cat(
+        [
+            _mel_latent(zeros),
+            _mel_latent(forward),
+            _mel_latent(zeros),
+            _mel_latent(forward[::-1]),
+        ]
+    )
+    out = anagram_epsilon(prediction, guidance_scale=1.0, frames=3, dim=-2)
+    assert torch.allclose(out[0, 0], torch.tensor(forward))
