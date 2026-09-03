@@ -30,9 +30,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ava.audio.engine import AudioAnagramEngine
 from ava.audio.features import describe
 from ava.audio.judge import ClapJudge
+from ava.audio.loop import BACKENDS, AudioGenerator, build_engine
 from ava.audio.perceive import forward_view, reverse_view
 from ava.audio.spec import AudioCandidateSpec
 from ava.audio.wavfile import write_wav
@@ -58,7 +58,7 @@ PROMPT_PAIRS: list[tuple[str, str]] = [
 
 
 def evaluate(
-    engine: AudioAnagramEngine, judge: ClapJudge, spec: AudioCandidateSpec, out: Path
+    engine: AudioGenerator, judge: ClapJudge, spec: AudioCandidateSpec, out: Path
 ) -> dict[str, Any]:
     """Generate one candidate, score both views, persist everything."""
     wave = engine.generate(spec)
@@ -107,15 +107,24 @@ def evaluate(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("results/step1"))
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="default results/step1 (stable_audio) or results/step1_<backend>",
+    )
+    parser.add_argument("--backend", choices=BACKENDS, default="stable_audio")
+    parser.add_argument("--model-id", default=None, help="default: the backend's own")
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--guidance-scale", type=float, default=7.0)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    suffix = "" if args.backend == "stable_audio" else f"_{args.backend}"
+    out_dir: Path = args.out or Path(f"results/step1{suffix}")
 
-    engine = AudioAnagramEngine(device=args.device)
+    engine = build_engine(args.backend, args.device, args.model_id)
     judge = ClapJudge(device=args.device, sample_rate=engine.sample_rate)
 
     rows: list[dict[str, Any]] = []
@@ -129,7 +138,7 @@ def main() -> None:
                 guidance_scale=args.guidance_scale,
                 num_inference_steps=args.steps,
             )
-            row = evaluate(engine, judge, spec, args.out)
+            row = evaluate(engine, judge, spec, out_dir)
             rows.append(row)
             mark = "HOLDS" if row["holds"] else "  -  "
             print(
@@ -139,8 +148,8 @@ def main() -> None:
                 f"  seed={seed}  {prompt_forward[:40]}"
             )
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    path = args.out / "scores.json"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "scores.json"
     path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
 
     held = sum(1 for r in rows if r["holds"])

@@ -15,6 +15,7 @@
 #   ROUNDS=10 K=6 scripts/run_audio_flip_evolve.sh    # longer
 #   STEPS=50 scripts/run_audio_flip_evolve.sh         # cheaper generations
 #   DURATION=3 scripts/run_audio_flip_evolve.sh       # shorter clips
+#   BACKEND=audioldm2 scripts/run_audio_flip_evolve.sh  # AudioLDM 2's mel latent
 #
 # The vocabulary grows during the run: whenever fewer than 8 untried arms are
 # left, GPT-2 (on the CPU) is asked for new envelope sentences.
@@ -36,12 +37,13 @@ CLUSTERS="${CLUSTERS:-4}"
 ETA="${ETA:-0.95}"
 RACE_FRACTION="${RACE_FRACTION:-0.3}"
 MAX_SEEDS="${MAX_SEEDS:-4}"
+BACKEND="${BACKEND:-stable_audio}"
 
 mkdir -p runs
 LOG="runs/${RUN_ID}.log"
 echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SEED}" \
      "steps=${STEPS} duration=${DURATION} clusters=${CLUSTERS} eta=${ETA} race_fraction=${RACE_FRACTION}" \
-     "max_seeds=${MAX_SEEDS}" | tee -a "$LOG"
+     "max_seeds=${MAX_SEEDS} backend=${BACKEND}" | tee -a "$LOG"
 
 .venv/bin/python -m ava.audio.loop \
     --run-id "$RUN_ID" \
@@ -55,6 +57,7 @@ echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SE
     --eta "$ETA" \
     --race-fraction "$RACE_FRACTION" \
     --max-seeds "$MAX_SEEDS" \
+    --backend "$BACKEND" \
     "$@" 2>&1 | tee -a "$LOG"
 
 .venv/bin/python -m scripts.search_summary --run "runs/${RUN_ID}" 2>&1 | tee -a "$LOG"

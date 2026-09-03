@@ -104,8 +104,17 @@ class AudioLoopConfig:
     supply_draws: int = 10
     device: str = "cuda"
     task: str = TIME_REVERSE.name
+    # Which latent the anagram is sampled in: Stable Audio Open's waveform
+    # codec or AudioLDM 2's mel codec. A run setting, not a candidate's: the
+    # search's uid does not see it, so runs on different backends are
+    # compared by their config.yaml, not by shared uids.
+    backend: str = "stable_audio"
+    # None means the backend's own default checkpoint.
+    model_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend}")
         if self.supply not in SUPPLIES:
             raise ValueError(f"supply must be one of {SUPPLIES}, got {self.supply}")
         if self.proposer not in PROPOSERS:
@@ -130,6 +139,31 @@ class AudioGenerator(Protocol):
     def sample_rate(self) -> int: ...
 
     def generate(self, spec: AudioCandidateSpec) -> np.ndarray: ...
+
+
+BACKENDS: tuple[str, ...] = ("stable_audio", "audioldm2")
+
+
+def build_engine(
+    backend: str, device: str, model_id: str | None = None
+) -> AudioGenerator:
+    """The generator for a backend name, loaded lazily on first use.
+
+    Imported here rather than at the top so that the loop -- and its tests,
+    which use a fake generator -- do not pay for diffusers.
+    """
+    if backend not in BACKENDS:
+        raise ValueError(f"backend must be one of {BACKENDS}, got {backend}")
+    kwargs: dict[str, Any] = {"device": device}
+    if model_id:
+        kwargs["model_id"] = model_id
+    if backend == "audioldm2":
+        from ava.audio.engine_audioldm2 import AudioLDM2Engine
+
+        return AudioLDM2Engine(**kwargs)
+    from ava.audio.engine import AudioAnagramEngine
+
+    return AudioAnagramEngine(**kwargs)
 
 
 class AudioJudge(Protocol):
@@ -429,6 +463,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--children-per-slot", type=int, default=SearchConfig().children_per_slot
     )
     p.add_argument("--device", default="cuda")
+    p.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="stable_audio",
+        help="which model's latent the anagram is sampled in",
+    )
+    p.add_argument("--model-id", default=None, help="default: the backend's own")
     return p
 
 
@@ -459,6 +500,8 @@ def main(argv: list[str] | None = None) -> None:
         supply_min_untried=args.supply_min_untried,
         supply_draws=args.supply_draws,
         device=args.device,
+        backend=args.backend,
+        model_id=args.model_id,
     )
     conn = connect(args.runs_dir / VOCAB_FILENAME)
     added = seed_audio_vocab(conn)
@@ -466,10 +509,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[vocab] seeded {added} audio arms")
     paths = RunPaths(args.runs_dir / args.run_id)
 
-    from ava.audio.engine import AudioAnagramEngine
     from ava.audio.judge import ClapJudge
 
-    engine = AudioAnagramEngine(device=config.device)
+    engine = build_engine(config.backend, config.device, config.model_id)
+    print(f"[engine] {config.backend} ({config.model_id or 'default checkpoint'})")
     judge = ClapJudge(device=config.device, sample_rate=engine.sample_rate)
     proposer: Proposer
     rng = np.random.default_rng(args.seed)

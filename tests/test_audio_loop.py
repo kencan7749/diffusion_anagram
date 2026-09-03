@@ -294,3 +294,50 @@ def test_audition_lists_held_candidates_best_first_and_counts_the_rest(
     assert "| e | f |" not in text
     everything = write_audition(rows, tmp_path / "all.md", min_j=None).read_text()
     assert "| e | f |" in everything
+
+
+# ---- which latent the anagram is sampled in ----------------------------------
+
+
+def test_backend_is_a_run_setting_with_stable_audio_as_default() -> None:
+    from dataclasses import asdict
+
+    from ava.audio.loop import BACKENDS, AudioLoopConfig
+
+    config = AudioLoopConfig(run_id="x")
+    assert config.backend == "stable_audio"
+    assert asdict(config)["backend"] == "stable_audio"
+    assert asdict(config)["model_id"] is None
+    assert "audioldm2" in BACKENDS
+
+
+def test_unknown_backend_is_rejected_before_anything_loads() -> None:
+    from ava.audio.loop import AudioLoopConfig, build_engine
+
+    with pytest.raises(ValueError, match="backend"):
+        AudioLoopConfig(run_id="x", backend="audiogen")
+    with pytest.raises(ValueError, match="backend"):
+        build_engine("audiogen", "cpu")
+
+
+def test_backend_flag_reaches_the_config() -> None:
+    from ava.audio.loop import build_parser
+
+    args = build_parser().parse_args(
+        ["--backend", "audioldm2", "--model-id", "cvssp/audioldm2-large"]
+    )
+    assert args.backend == "audioldm2"
+    assert args.model_id == "cvssp/audioldm2-large"
+    assert build_parser().parse_args([]).backend == "stable_audio"
+
+
+def test_backend_does_not_enter_the_candidate_uid() -> None:
+    """Runs on different backends are compared by config.yaml, not by uid."""
+    from ava.audio.loop import AudioLoopConfig, to_audio_spec
+
+    spec = CandidateSpec(
+        task=TIME_REVERSE.name, prompts=("a hit that decays", "a swell that stops")
+    )
+    a = to_audio_spec(spec, AudioLoopConfig(run_id="a", backend="stable_audio"))
+    b = to_audio_spec(spec, AudioLoopConfig(run_id="b", backend="audioldm2"))
+    assert a.uid() == b.uid()
