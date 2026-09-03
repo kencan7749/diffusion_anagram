@@ -189,6 +189,58 @@ with the latent of the reversed audio directly):
 .venv/bin/python -m scripts.step1_first_anagram --backend audioldm2
 ```
 
+### Two more audio illusions
+
+The audio loop is task-driven (`--task`): the task names its slots, its
+perceptual views (`ava/audio/perceive.py`, a registry keyed by view name),
+the files a candidate is written to (`<view>.wav`) and the columns of
+`audition.md`.
+
+**The frequency hybrid** (`freq_hybrid_750`, AudioLDM 2 only) is Factorized
+Diffusion's hybrid image with a low-pass in place of the blur: slot `near` is
+heard in the room, slot `far` through a wall (below 750 Hz). Hearing has no
+"close up means high frequencies" mechanism the way vision does, so the near
+view is the whole signal, not its high band. The split has to be a map on the
+latent, and zeroing the latent's frequency rows is not one (it decodes to
+something further from a low-passed signal than the untouched latent). What
+works is a per-frame affine map fitted by least squares from
+`(Enc(x), Enc(lowpass(x)))` pairs (`ava/audio/bands.py`); Step 0c fits it,
+checks it on held-out clips and persists it with the digests of the clips it
+came from. The projector is data, so every run names it (`--projector`) and
+records its digest in `config.yaml`.
+
+| held-out clip (750 Hz) | measured | null | floor | energy above 750 Hz |
+|---|---|---|---|---|
+| percussive burst | 4.7 dB | 25.3 | 3.9 | -29 dB |
+| AudioLDM 2 "match being struck" | 4.9 dB | 14.6 | 3.0 | -32 dB |
+| Stable Audio "hammer on anvil" | 7.6 dB | 28.1 | 5.9 | -38 dB |
+
+Step 1 on three authored pairs held 6/6 at a median J of 0.90. A control
+with the same seeds and sampler but the near prompt in both slots shows
+where the hybrid does the work: the low band of plain "rain" does not read
+as "thunder" (margin -0.01) but the hybrid's does (+0.17, +0.11), whereas
+low-passed "sizzling" already reads as "a truck idling" on its own.
+
+**The time jigsaw** (`time_jigsaw_4`, either backend) is Visual Anagrams'
+jigsaw with time in place of the plane: slot `whole` is the recording as
+made, slot `shuffled` the same recording cut into four equal blocks and
+spliced in a fixed order (`ava/audio/permute.py`, seed 0, no block stays
+put). The engines return exactly the span the latent view acted on, so the
+listener's cuts and the latent's fall at the same instants. Step 0b with
+`--view jigsaw_4` reads better than the flip on the waveform codec (latent
+cosine 0.96 to 0.99 against 0.44 to 0.80): a block permutation only breaks
+the codec's convolutions at three boundaries.
+
+```bash
+.venv/bin/python -m scripts.step0c_freq_view_validity --cutoff 750        # fit + persist the projector
+.venv/bin/python -m scripts.step1_first_anagram --task freq_hybrid_750 --backend audioldm2 \
+    --projector results/step0c_freq_view/projector_750hz --guidance-scale 3.5 --steps 200
+TASK=freq_hybrid_750 BACKEND=audioldm2 PROJECTOR=results/step0c_freq_view/projector_750hz \
+    scripts/run_audio_flip_evolve.sh
+.venv/bin/python -m scripts.step0b_view_validity --view jigsaw_4           # the jigsaw on Stable Audio
+TASK=time_jigsaw_4 scripts/run_audio_flip_evolve.sh
+```
+
 ## Layout
 
 ```
@@ -211,10 +263,12 @@ ava/          the pipeline
     judge.py      CLIP scoring, BLIP captions as evidence only
     animate.py    transition clips via the upstream animate.py
     paper_examples.py  prompts quoted from the papers, with figure citations
-  audio/        the time-reversal anagram track (tasks, vocab, loop: the audio flip
-                search; engine, engine_audioldm2: the sampler on Stable Audio's and
-                AudioLDM 2's latents; codec, mel: the autoencoders behind one
-                interface; judge, perceive: CLAP and the views)
+  audio/        the audio illusions (tasks: time_reverse, freq_hybrid_750,
+                time_jigsaw_4; vocab, loop: the search; engine, engine_audioldm2:
+                the samplers on Stable Audio's and AudioLDM 2's latents; codec,
+                mel: the autoencoders behind one interface; bands: the fitted
+                low-pass on the latent; permute: the jigsaw's cut; judge,
+                perceive: CLAP and the listener's views)
 ava_vocab/    vocabulary generation from GPT-2 (see its README)
 scripts/      one-off analyses, and webui.py to watch runs in the browser
 tests/

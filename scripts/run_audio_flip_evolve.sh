@@ -16,6 +16,9 @@
 #   STEPS=50 scripts/run_audio_flip_evolve.sh         # cheaper generations
 #   DURATION=3 scripts/run_audio_flip_evolve.sh       # shorter clips
 #   BACKEND=audioldm2 scripts/run_audio_flip_evolve.sh  # AudioLDM 2's mel latent
+#   TASK=time_jigsaw_4 scripts/run_audio_flip_evolve.sh # the time jigsaw instead of the flip
+#   TASK=freq_hybrid_750 BACKEND=audioldm2 PROJECTOR=results/step0c_freq_view/projector_750hz \
+#       GUIDANCE=3.5 STEPS=200 scripts/run_audio_flip_evolve.sh   # the frequency hybrid
 #
 # The vocabulary grows during the run: whenever fewer than 8 untried arms are
 # left, GPT-2 (on the CPU) is asked for new envelope sentences.
@@ -38,12 +41,17 @@ ETA="${ETA:-0.95}"
 RACE_FRACTION="${RACE_FRACTION:-0.3}"
 MAX_SEEDS="${MAX_SEEDS:-4}"
 BACKEND="${BACKEND:-stable_audio}"
+TASK="${TASK:-time_reverse}"
+GUIDANCE="${GUIDANCE:-7.0}"
+PROJECTOR="${PROJECTOR:-}"
+PROJECTOR_ARGS=()
+if [ -n "$PROJECTOR" ]; then PROJECTOR_ARGS=(--projector "$PROJECTOR"); fi
 
 mkdir -p runs
 LOG="runs/${RUN_ID}.log"
 echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SEED}" \
      "steps=${STEPS} duration=${DURATION} clusters=${CLUSTERS} eta=${ETA} race_fraction=${RACE_FRACTION}" \
-     "max_seeds=${MAX_SEEDS} backend=${BACKEND}" | tee -a "$LOG"
+     "max_seeds=${MAX_SEEDS} backend=${BACKEND} task=${TASK} guidance=${GUIDANCE}" | tee -a "$LOG"
 
 .venv/bin/python -m ava.audio.loop \
     --run-id "$RUN_ID" \
@@ -58,6 +66,9 @@ echo "[run_audio_flip_evolve] run_id=${RUN_ID} rounds=${ROUNDS} k=${K} seed=${SE
     --race-fraction "$RACE_FRACTION" \
     --max-seeds "$MAX_SEEDS" \
     --backend "$BACKEND" \
+    --task "$TASK" \
+    --guidance-scale "$GUIDANCE" \
+    "${PROJECTOR_ARGS[@]}" \
     "$@" 2>&1 | tee -a "$LOG"
 
 .venv/bin/python -m scripts.search_summary --run "runs/${RUN_ID}" 2>&1 | tee -a "$LOG"
@@ -66,5 +77,5 @@ echo
 echo "audition      : runs/${RUN_ID}/audition.md   (what held, with forward.wav / reverse.wav)"
 echo "archive       : runs/${RUN_ID}/archive.jsonl"
 echo "summary       : runs/${RUN_ID}/search_summary.md"
-echo "components    : runs/${RUN_ID}/components.md   (task = \`time_reverse\`)"
+echo "components    : runs/${RUN_ID}/components.md   (task = \`${TASK}\`)"
 echo "log           : ${LOG}"
