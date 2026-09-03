@@ -37,7 +37,9 @@ import torch
 from ava.audio.permute import (
     JIGSAW_BLOCKS,
     JIGSAW_PERM,
+    MOSAIC_SEED,
     block_slices,
+    derangement,
     inverse_permutation,
 )
 from ava.audio.spec import AudioCandidateSpec
@@ -129,11 +131,38 @@ class BlockPermute:
         return permute_blocks(latent, frames, inverse_permutation(self.perm), dim)
 
 
+@dataclass(frozen=True)
+class FramePermute:
+    """Every occupied frame moves: the permutation is drawn for `frames`.
+
+    Deterministic in (frames, seed), so a run is reproducible from its
+    config and the listener's view (`ava.audio.perceive.mosaic_view`) can
+    draw the same permutation from the same numbers. The name says how long
+    a frame is expected to be; the task only allows codecs where it is.
+    """
+
+    seed: int = MOSAIC_SEED
+    name: str = "mosaic_40ms"
+
+    def perm(self, frames: int) -> tuple[int, ...]:
+        return derangement(frames, self.seed)
+
+    def apply(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return permute_blocks(latent, frames, self.perm(frames), dim)
+
+    def invert(self, latent: torch.Tensor, frames: int, dim: int = -1) -> torch.Tensor:
+        return permute_blocks(
+            latent, frames, inverse_permutation(self.perm(frames)), dim
+        )
+
+
 TIME_REVERSE_VIEW = TimeReverse()
 JIGSAW_VIEW = BlockPermute()
+MOSAIC_VIEW = FramePermute()
 LATENT_VIEWS: dict[str, LatentView] = {
     TIME_REVERSE_VIEW.name: TIME_REVERSE_VIEW,
     JIGSAW_VIEW.name: JIGSAW_VIEW,
+    MOSAIC_VIEW.name: MOSAIC_VIEW,
 }
 
 

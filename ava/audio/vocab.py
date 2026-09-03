@@ -26,7 +26,12 @@ from __future__ import annotations
 
 import sqlite3
 
-from ava.audio.tasks import FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
+from ava.audio.tasks import (
+    FREQ_HYBRID_750,
+    TIME_JIGSAW_4,
+    TIME_MOSAIC_40MS,
+    TIME_REVERSE,
+)
 from ava.image.tasks import STYLE, SUBJECT
 from ava.vocab import UNIFORM_PRIOR, add_arm
 
@@ -173,6 +178,53 @@ def seed_jigsaw_vocab(conn: sqlite3.Connection) -> int:
     task = TIME_JIGSAW_4.name
     added = 0
     for word in JIGSAW_PROMPTS:
+        added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    for style in STYLES:
+        added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    return added
+
+
+# The mosaic's pool. A 40 ms shuffle turns anything with structure at longer
+# scales -- speech, a melody, a rhythm -- into a grainy texture, and leaves a
+# texture a texture (CLAP moves 0.3 in cosine on the former and not at all on
+# the latter). So one side is structured sounds and the other textures, the
+# hybrid's "flexible subject" again; both slots draw from the one pool.
+MOSAIC_STRUCTURED: tuple[str, ...] = (
+    "a man giving a speech",
+    "a woman reading the news",
+    "a child laughing",
+    "a piano melody",
+    "a violin playing a slow tune",
+    "a trumpet fanfare",
+    "morse code being tapped out",
+    "someone typing on a keyboard",
+    "footsteps on a wooden floor",
+    "a dog barking",
+    "a rooster crowing",
+    "church bells ringing",
+)
+
+MOSAIC_TEXTURES: tuple[str, ...] = (
+    "rain falling steadily on a roof",
+    "a crowd applauding in a hall",
+    "a crackling campfire",
+    "wind blowing through trees",
+    "a waterfall",
+    "static noise from a radio",
+    "cicadas on a summer afternoon",
+    "bacon frying in a pan",
+    "a busy street with traffic",
+    "waves breaking on a beach",
+    "a swarm of bees",
+    "a crowd murmuring in a restaurant",
+)
+
+
+def seed_mosaic_vocab(conn: sqlite3.Connection) -> int:
+    """Register the mosaic pool as arms of `time_mosaic_40ms`. Idempotent."""
+    task = TIME_MOSAIC_40MS.name
+    added = 0
+    for word in MOSAIC_STRUCTURED + MOSAIC_TEXTURES:
         added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
     for style in STYLES:
         added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)

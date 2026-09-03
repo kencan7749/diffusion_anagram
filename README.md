@@ -231,6 +231,19 @@ listener's cuts and the latent's fall at the same instants. Step 0b with
 cosine 0.96 to 0.99 against 0.44 to 0.80): a block permutation only breaks
 the codec's convolutions at three boundaries.
 
+**The time mosaic** (`time_mosaic_40ms`, AudioLDM 2 only) is the jigsaw at
+the finest cut the codec can follow: every latent frame (40 ms) moves, under
+a permutation drawn from the frame count and a fixed seed, and the
+listener's view cuts the waveform into the same 40 ms blocks with a 5 ms
+fade at each cut. The granularity was chosen by measurement, not taste: CLAP
+does not hear a shuffle of blocks longer than about 150 ms (cosine to the
+original 0.90, as for reversal) and hears 40 ms blocks clearly (0.69), while
+the waveform codec cannot follow cuts finer than about 200 ms (+8 dB over
+its floor at 93 ms) and the mel codec follows 40 ms cuts within 1 dB on
+generated clips once the cuts are faded. A 40 ms shuffle turns anything
+structured -- speech, a melody, a rhythm -- into a grainy texture and leaves
+a texture a texture, so the vocabulary pairs the two.
+
 ```bash
 .venv/bin/python -m scripts.step0c_freq_view_validity --cutoff 750        # fit + persist the projector
 .venv/bin/python -m scripts.step1_first_anagram --task freq_hybrid_750 --backend audioldm2 \
@@ -239,6 +252,7 @@ TASK=freq_hybrid_750 BACKEND=audioldm2 PROJECTOR=results/step0c_freq_view/projec
     scripts/run_audio_flip_evolve.sh
 .venv/bin/python -m scripts.step0b_view_validity --view jigsaw_4           # the jigsaw on Stable Audio
 TASK=time_jigsaw_4 scripts/run_audio_flip_evolve.sh
+TASK=time_mosaic_40ms BACKEND=audioldm2 GUIDANCE=3.5 STEPS=200 scripts/run_audio_flip_evolve.sh
 ```
 
 ## Layout
@@ -264,7 +278,7 @@ ava/          the pipeline
     animate.py    transition clips via the upstream animate.py
     paper_examples.py  prompts quoted from the papers, with figure citations
   audio/        the audio illusions (tasks: time_reverse, freq_hybrid_750,
-                time_jigsaw_4; vocab, loop: the search; engine, engine_audioldm2:
+                time_jigsaw_4, time_mosaic_40ms; vocab, loop: the search; engine, engine_audioldm2:
                 the samplers on Stable Audio's and AudioLDM 2's latents; codec,
                 mel: the autoencoders behind one interface; bands: the fitted
                 low-pass on the latent; permute: the jigsaw's cut; judge,

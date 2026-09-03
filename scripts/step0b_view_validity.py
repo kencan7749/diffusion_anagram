@@ -273,8 +273,18 @@ def main() -> None:
     view: LatentView | None = None
     if args.view != "time_reverse":
         view = LATENT_VIEWS[args.view]
-        blocks = len(getattr(view, "perm", ()))
-        signals = trim_to_blocks(signals, blocks * codec.samples_per_frame)
+        if args.view.startswith("mosaic"):
+            frame_s = codec.samples_per_frame / codec.sample_rate
+            if abs(frame_s - 0.04) > 1e-9:
+                raise SystemExit(
+                    f"{args.view} needs a 40 ms latent frame; {args.codec}'s is"
+                    f" {1000 * frame_s:.1f} ms"
+                )
+            # Every frame is a block: trim to whole frames.
+            signals = trim_to_blocks(signals, codec.samples_per_frame)
+        else:
+            blocks = len(getattr(view, "perm", ()))
+            signals = trim_to_blocks(signals, blocks * codec.samples_per_frame)
     path = run(out_dir, codec, signals, view)
 
     result = json.loads(path.read_text(encoding="utf-8"))

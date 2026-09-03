@@ -35,7 +35,12 @@ from ava.audio.judge import ClapJudge
 from ava.audio.loop import AUDIO_TASK_NAMES, BACKENDS, AudioGenerator, build_engine
 from ava.audio.perceive import perceive
 from ava.audio.spec import AudioCandidateSpec
-from ava.audio.tasks import FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
+from ava.audio.tasks import (
+    FREQ_HYBRID_750,
+    TIME_JIGSAW_4,
+    TIME_MOSAIC_40MS,
+    TIME_REVERSE,
+)
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import IllusionTask, get_task
 from ava.metric import scores_to_probs
@@ -81,6 +86,13 @@ PROMPT_PAIRS: dict[str, list[tuple[str, str]]] = {
             "a car starting up and driving off",
             "a car arriving and the engine switching off",
         ),
+    ],
+    # (whole, mosaic): a structured sound, and the texture its 40 ms grains
+    # could pass for once shuffled.
+    TIME_MOSAIC_40MS.name: [
+        ("a man giving a speech", "a crowd murmuring in a restaurant"),
+        ("a piano melody", "wind chimes in a breeze"),
+        ("morse code being tapped out", "rain falling steadily on a roof"),
     ],
 }
 

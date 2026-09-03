@@ -524,3 +524,33 @@ def test_jigsaw_engine_dispatch_carries_the_view() -> None:
     assert engine.view is JIGSAW_VIEW  # type: ignore[attr-defined]
     engine = build_engine("audioldm2", "cpu", task="time_jigsaw_4")
     assert engine.view is JIGSAW_VIEW  # type: ignore[attr-defined]
+
+
+# ---- the mosaic as a task -------------------------------------------------------
+
+
+def test_mosaic_task_needs_the_mel_backend_and_records_its_view() -> None:
+    from ava.audio.engine import MOSAIC_VIEW
+    from ava.audio.loop import AudioLoopConfig, build_engine
+    from ava.audio.tasks import TIME_MOSAIC_40MS
+
+    assert get_task("time_mosaic_40ms") is TIME_MOSAIC_40MS
+    with pytest.raises(ValueError, match="only be sampled on"):
+        build_engine("stable_audio", "cpu", task=TIME_MOSAIC_40MS.name)
+    engine = build_engine("audioldm2", "cpu", task=TIME_MOSAIC_40MS.name)
+    assert engine.view is MOSAIC_VIEW  # type: ignore[attr-defined]
+    config = AudioLoopConfig(
+        run_id="m", task=TIME_MOSAIC_40MS.name, backend="audioldm2"
+    )
+    assert config.view_params["mosaic_40ms"]["block_s"] == 0.04
+    assert config.view_params["mosaic_40ms"]["seed"] == 0
+
+
+def test_mosaic_vocab_seeds_once(tmp_path: Path) -> None:
+    from ava.audio.vocab import MOSAIC_STRUCTURED, MOSAIC_TEXTURES, seed_mosaic_vocab
+
+    conn = connect(tmp_path / "vocab.db")
+    assert seed_mosaic_vocab(conn) == len(MOSAIC_STRUCTURED) + len(MOSAIC_TEXTURES) + 1
+    assert seed_mosaic_vocab(conn) == 0
+    assert len(list_arms(conn, "time_mosaic_40ms", "subject")) == 24
+    conn.close()

@@ -41,8 +41,19 @@ from ava.audio.spec import (
     NUM_INFERENCE_STEPS,
     AudioCandidateSpec,
 )
-from ava.audio.tasks import AUDIO_TASKS, FREQ_HYBRID_750, TIME_JIGSAW_4, TIME_REVERSE
-from ava.audio.vocab import seed_audio_vocab, seed_hybrid_vocab, seed_jigsaw_vocab
+from ava.audio.tasks import (
+    AUDIO_TASKS,
+    FREQ_HYBRID_750,
+    TIME_JIGSAW_4,
+    TIME_MOSAIC_40MS,
+    TIME_REVERSE,
+)
+from ava.audio.vocab import (
+    seed_audio_vocab,
+    seed_hybrid_vocab,
+    seed_jigsaw_vocab,
+    seed_mosaic_vocab,
+)
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import get_task
 from ava.loop import (
@@ -166,6 +177,8 @@ TASK_BACKENDS: dict[str, tuple[str, ...]] = {
     TIME_REVERSE.name: BACKENDS,
     FREQ_HYBRID_750.name: ("audioldm2",),
     TIME_JIGSAW_4.name: BACKENDS,
+    # One latent frame must be 40 ms for the listener's view to match.
+    TIME_MOSAIC_40MS.name: ("audioldm2",),
 }
 
 
@@ -206,9 +219,12 @@ def build_engine(
                 f"{task} expects a 750 Hz projector, {projector} is {fitted.cutoff_hz}"
             )
         return AudioLDM2HybridEngine(projector=fitted, **kwargs)
-    from ava.audio.engine import JIGSAW_VIEW, TIME_REVERSE_VIEW
+    from ava.audio.engine import JIGSAW_VIEW, MOSAIC_VIEW, TIME_REVERSE_VIEW
 
-    kwargs["view"] = JIGSAW_VIEW if task == TIME_JIGSAW_4.name else TIME_REVERSE_VIEW
+    kwargs["view"] = {
+        TIME_JIGSAW_4.name: JIGSAW_VIEW,
+        TIME_MOSAIC_40MS.name: MOSAIC_VIEW,
+    }.get(task, TIME_REVERSE_VIEW)
     if backend == "audioldm2":
         from ava.audio.engine_audioldm2 import AudioLDM2Engine
 
@@ -593,6 +609,10 @@ def main(argv: list[str] | None = None) -> None:
         added = seed_jigsaw_vocab(conn)
         if added:
             print(f"[vocab] seeded {added} jigsaw arms")
+    if config.task == TIME_MOSAIC_40MS.name:
+        added = seed_mosaic_vocab(conn)
+        if added:
+            print(f"[vocab] seeded {added} mosaic arms")
     paths = RunPaths(args.runs_dir / args.run_id)
 
     from ava.audio.judge import ClapJudge

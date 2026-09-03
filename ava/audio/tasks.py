@@ -57,7 +57,26 @@ TIME_JIGSAW_4 = IllusionTask(
     "block permutation of time as the view (Step 0b --view jigsaw_4)",
 )
 
-AUDIO_TASKS: tuple[IllusionTask, ...] = (TIME_REVERSE, FREQ_HYBRID_750, TIME_JIGSAW_4)
+# The mosaic: the jigsaw at the finest cut the codec can follow, one latent
+# frame (40 ms), every frame moved. Only on a codec whose frame is 40 ms
+# (AudioLDM 2), otherwise the listener's cuts and the latent's disagree. The
+# permutation is drawn from the frame count and a fixed seed.
+TIME_MOSAIC_40MS = IllusionTask(
+    name="time_mosaic_40ms",
+    paper=AUDIO,
+    slots=(Slot("whole", SUBJECT), Slot("mosaic", SUBJECT)),
+    view_names=("whole", "mosaic_40ms"),
+    reduction="mean",
+    citation="ava/audio/engine.py FramePermute: Visual Anagrams' pixel permutation "
+    "with latent frames as the pixels (Step 0b --view mosaic_40ms)",
+)
+
+AUDIO_TASKS: tuple[IllusionTask, ...] = (
+    TIME_REVERSE,
+    FREQ_HYBRID_750,
+    TIME_JIGSAW_4,
+    TIME_MOSAIC_40MS,
+)
 
 for _task in AUDIO_TASKS:
     register_task(_task)

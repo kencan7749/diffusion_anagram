@@ -19,6 +19,15 @@ import random
 JIGSAW_BLOCKS = 4
 JIGSAW_SEED = 0
 
+# The mosaic: every latent frame moves. 40 ms is AudioLDM 2's latent frame,
+# the finest cut its codec can follow (Step 0b sweep: +1 dB over the codec's
+# floor on generated clips with a 5 ms fade at each cut, against +9 dB for the
+# waveform codec's 46 ms frame), and fine enough for CLAP to hear (cosine to
+# the original 0.69, against 0.90 for time reversal).
+MOSAIC_BLOCK_S = 0.04
+MOSAIC_SEED = 0
+MOSAIC_FADE_S = 0.005
+
 
 def derangement(blocks: int, seed: int) -> tuple[int, ...]:
     """A permutation of `range(blocks)` with no fixed point, drawn from `seed`.

@@ -75,7 +75,7 @@ def test_block_permute_inverts_itself_and_agrees_with_the_waveform_view() -> Non
 
 
 def test_the_registries_agree_on_names() -> None:
-    assert set(LATENT_VIEWS) == {"time_reverse", "jigsaw_4"}
+    assert set(LATENT_VIEWS) == {"time_reverse", "jigsaw_4", "mosaic_40ms"}
     assert JIGSAW_VIEW.perm == JIGSAW_PERM
     assert "jigsaw_4" in VIEWS and "whole" in VIEWS
 
@@ -91,3 +91,51 @@ def test_anagram_epsilon_inverts_the_view_before_averaging() -> None:
     assert TIME_REVERSE_VIEW.invert(TIME_REVERSE_VIEW.apply(forward, 4), 4).equal(
         forward
     )
+
+
+# ---- the mosaic: every frame moves ------------------------------------------------
+
+
+def test_frame_permute_draws_from_the_frame_count_and_inverts() -> None:
+    from ava.audio.engine import MOSAIC_VIEW, FramePermute
+
+    view = FramePermute(seed=0)
+    assert view.perm(125) == derangement(125, 0)
+    assert view.perm(125) != view.perm(126)[:125]
+    latent = torch.randn(1, 8, 125, 16)
+    moved = view.apply(latent, 125, dim=-2)
+    assert not torch.equal(moved, latent)
+    assert torch.equal(view.invert(moved, 125, dim=-2), latent)
+    # Every frame moved: no frame equals its original.
+    same = (moved == latent).permute(2, 0, 1, 3).reshape(125, -1).all(dim=1)
+    assert not same.any()
+    assert MOSAIC_VIEW.name == "mosaic_40ms" and "mosaic_40ms" in LATENT_VIEWS
+
+
+def test_mosaic_view_moves_the_same_blocks_as_the_latent_side() -> None:
+    from ava.audio.engine import FramePermute
+    from ava.audio.perceive import mosaic_view
+
+    rate, frames, hop = 16_000, 25, 640  # 40 ms frames at 16 kHz
+    wave = np.repeat(np.arange(frames, dtype=np.float64), hop)[None, :]
+    without_fade = mosaic_view(0.04, seed=0, fade_s=0.0)(wave, rate)
+    latent = torch.arange(frames, dtype=torch.float32).reshape(1, 1, frames, 1)
+    moved = FramePermute(seed=0).apply(latent, frames, dim=-2).flatten().numpy()
+    assert np.array_equal(without_fade[0], np.repeat(moved.astype(np.float64), hop))
+
+
+def test_mosaic_view_fades_each_cut_and_keeps_the_layout() -> None:
+    from ava.audio.perceive import VIEWS, mosaic_view
+
+    rate = 16_000
+    wave = np.ones((2, 640 * 10))
+    out = mosaic_view(0.04, seed=0, fade_s=0.005)(wave, rate)
+    assert out.shape == wave.shape
+    # 80 samples of fade at each end of each 640-sample block; the middle is 1.
+    assert out[0, 0] < 0.05 and out[0, 79] > 0.95 and out[0, 320] == 1.0
+    assert out[0, 639] < 0.05
+    assert VIEWS["mosaic_40ms"](wave, rate).shape == wave.shape
+    import pytest
+
+    with pytest.raises(ValueError):
+        mosaic_view(0.04)(np.ones((1, 640)), rate)
