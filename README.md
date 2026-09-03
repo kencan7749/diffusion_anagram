@@ -121,7 +121,8 @@ they are the judge's own CLIP. A run is reproducible from its seed byte for
 byte (`archive.jsonl` included), and resumes from its persisted state.
 
 ```bash
-scripts/run_flip_evolve.sh      # flip with v2; ROUNDS, K, SEED, RACE_FRACTION, ... as env vars
+TASKS=hybrid scripts/run_evolve.sh   # any task(s) with v2, then search_summary and clips; ROUNDS, K, SEED, ANIMATE=held|all|none, ... as env vars
+scripts/run_flip_evolve.sh           # the same for flip, named flip_evo_<date>
 .venv/bin/python -m ava.loop --run-id evo --tasks flip,hybrid,jigsaw --rounds 12 --k 8 \
     --proposer evolve --harvest-seeds 0 --harvest-top 0
 .venv/bin/python -m scripts.search_summary --run runs/evo   # what the archive learned
