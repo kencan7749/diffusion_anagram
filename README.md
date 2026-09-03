@@ -155,6 +155,38 @@ the image loop. The listening list is `audition.md`.
 ```bash
 scripts/run_audio_flip_evolve.sh     # v2 search of the audio flip; ~12 s per candidate
 .venv/bin/python -m ava.audio.loop --run-id audio --rounds 6 -k 6 --proposer bandit
+BACKEND=audioldm2 scripts/run_audio_flip_evolve.sh   # the same search in AudioLDM 2's latent
+```
+
+The anagram can be sampled in either of two latents, chosen by `--backend`
+(a run setting, recorded in `config.yaml`; the default is `stable_audio`).
+Stable Audio Open's latent is a waveform codec's, a stack of 1D convolutions
+whose learned kernels do not commute with reversal; Step 0b measured the
+flipped latent against the latent of the reversed audio at a cosine of 0.70
+on a percussive probe. AudioLDM 2 (`cvssp/audioldm2`, 16 kHz mono) denoises
+the latent of a log-mel spectrogram, and a symmetric-window magnitude
+spectrogram reverses exactly with the audio up to its frame grid, so there
+only the 2D VAE can fail to commute. `ava/audio/mel.py` rebuilds the mel
+front end diffusers does not ship (checked by playing it through the
+vocoder: `scripts.smoke_audioldm2`), `AudioLDM2Codec` puts it behind the same
+codec interface, and `ava/audio/engine_audioldm2.py` runs the same sampler on
+the (B, 8, T/4, 16) latent with time as the second-to-last axis.
+
+Step 0b on both codecs (`results/step0b/`, `results/step0b_audioldm2/`;
+`headroom` is the flipped latent's decode against the reversed audio, minus
+the codec's own round-trip error, and `lat_cos` compares the flipped latent
+with the latent of the reversed audio directly):
+
+| probe | Stable Audio headroom | lat_cos | AudioLDM 2 headroom | lat_cos |
+|---|---|---|---|---|
+| percussive burst | +0.63 dB | 0.70 | +0.31 dB | 0.99 |
+| rising chirp | +1.11 dB | 0.80 | -0.42 dB | 1.00 |
+| generated clips (3) | +0.22 to +4.72 dB | 0.44 to 0.75 | +0.11 to +0.61 dB | 0.94 to 0.98 |
+
+```bash
+.venv/bin/python -m scripts.smoke_audioldm2                        # load, vocoder round trip, three clips
+.venv/bin/python -m scripts.step0b_view_validity --codec audioldm2 # is the flip the reversal, in this latent?
+.venv/bin/python -m scripts.step1_first_anagram --backend audioldm2
 ```
 
 ## Layout
@@ -180,7 +212,9 @@ ava/          the pipeline
     animate.py    transition clips via the upstream animate.py
     paper_examples.py  prompts quoted from the papers, with figure citations
   audio/        the time-reversal anagram track (tasks, vocab, loop: the audio flip
-                search; engine, judge, perceive: Stable Audio, CLAP, the views)
+                search; engine, engine_audioldm2: the sampler on Stable Audio's and
+                AudioLDM 2's latents; codec, mel: the autoencoders behind one
+                interface; judge, perceive: CLAP and the views)
 ava_vocab/    vocabulary generation from GPT-2 (see its README)
 scripts/      one-off analyses, and webui.py to watch runs in the browser
 tests/
