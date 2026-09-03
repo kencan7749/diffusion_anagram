@@ -5,10 +5,18 @@ The sampler's arithmetic is `ava.audio.engine`'s and is tested there with
 size, and that the time axis it flips is the mel latent's.
 """
 
+import numpy as np
 import pytest
 import torch
 
-from ava.audio.engine_audioldm2 import TIME_DIM, AudioLDM2Engine, stack_padded
+from ava.audio.bands import LowpassProjector
+from ava.audio.engine_audioldm2 import (
+    TIME_DIM,
+    AudioLDM2Engine,
+    AudioLDM2HybridEngine,
+    hybrid_epsilon,
+    stack_padded,
+)
 
 
 def test_the_time_axis_is_the_second_to_last() -> None:
@@ -58,3 +66,58 @@ def test_stack_padded_pads_sequences_and_masks_to_the_longest() -> None:
 def test_stack_padded_leaves_equal_lengths_alone() -> None:
     rows = [torch.rand(1, 8, 5) for _ in range(4)]
     assert torch.equal(stack_padded(rows), torch.cat(rows))
+
+
+# ---- the frequency hybrid's arithmetic -----------------------------------------
+
+_C, _T, _F = 2, 3, 4
+_D = _C * _F
+
+
+def _split(weight: np.ndarray) -> LowpassProjector:
+    return LowpassProjector(weight=weight, bias=np.zeros(_D), cutoff_hz=750.0)
+
+
+def _rows(near: float, far: float) -> torch.Tensor:
+    """[uncond, near, uncond, far] with constant estimates, uncond = 0."""
+    zeros = torch.zeros(1, _C, _T, _F, dtype=torch.float64)
+    return torch.cat(
+        [zeros, torch.full_like(zeros, near), zeros, torch.full_like(zeros, far)]
+    )
+
+
+def test_hybrid_takes_the_low_band_from_far_and_the_rest_from_near() -> None:
+    everything_is_low = _split(np.eye(_D))
+    nothing_is_low = _split(np.zeros((_D, _D)))
+    prediction = _rows(near=1.0, far=5.0)
+    assert torch.allclose(
+        hybrid_epsilon(prediction, 1.0, everything_is_low),
+        torch.full((1, _C, _T, _F), 5.0, dtype=torch.float64),
+    )
+    assert torch.allclose(
+        hybrid_epsilon(prediction, 1.0, nothing_is_low),
+        torch.full((1, _C, _T, _F), 1.0, dtype=torch.float64),
+    )
+
+
+def test_hybrid_returns_agreeing_branches_unchanged() -> None:
+    """The components sum to the identity, so agreement passes straight through."""
+    rng = np.random.default_rng(0)
+    projector = _split(rng.normal(size=(_D, _D)))
+    estimate = torch.randn(1, _C, _T, _F, dtype=torch.float64)
+    zeros = torch.zeros_like(estimate)
+    prediction = torch.cat([zeros, estimate, zeros, estimate])
+    assert torch.allclose(hybrid_epsilon(prediction, 1.0, projector), estimate)
+
+
+def test_hybrid_applies_guidance_within_each_branch() -> None:
+    # uncond 0, cond 1 -> 0 + 3 * (1 - 0) = 3 on the near side; far = 0.
+    prediction = _rows(near=1.0, far=0.0)
+    out = hybrid_epsilon(prediction, 3.0, _split(np.zeros((_D, _D))))
+    assert torch.allclose(out, torch.full_like(out, 3.0))
+
+
+def test_hybrid_engine_needs_a_projector_and_loads_nothing() -> None:
+    engine = AudioLDM2HybridEngine(projector=_split(np.eye(_D)), device="cpu")
+    assert engine._pipe is None
+    assert engine.projector.cutoff_hz == 750.0

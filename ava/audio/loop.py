@@ -20,6 +20,7 @@ Run from the repository root:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import time
@@ -40,8 +41,8 @@ from ava.audio.spec import (
     NUM_INFERENCE_STEPS,
     AudioCandidateSpec,
 )
-from ava.audio.tasks import AUDIO_TASKS, TIME_REVERSE
-from ava.audio.vocab import seed_audio_vocab
+from ava.audio.tasks import AUDIO_TASKS, FREQ_HYBRID_750, TIME_REVERSE
+from ava.audio.vocab import seed_audio_vocab, seed_hybrid_vocab
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import get_task
 from ava.loop import (
@@ -111,6 +112,10 @@ class AudioLoopConfig:
     backend: str = "stable_audio"
     # None means the backend's own default checkpoint.
     model_id: str | None = None
+    # The frequency hybrid samples with a fitted low-pass projector (Step 0c).
+    # It is data, not code, so a run names the file and records its digest.
+    projector: str | None = None
+    projector_md5: str | None = None
 
     def __post_init__(self) -> None:
         if self.task not in AUDIO_TASK_NAMES:
@@ -146,19 +151,51 @@ class AudioGenerator(Protocol):
 BACKENDS: tuple[str, ...] = ("stable_audio", "audioldm2")
 
 
+# Which backends can sample which task. The frequency hybrid needs a latent
+# with a frequency axis, which only the mel codec has.
+TASK_BACKENDS: dict[str, tuple[str, ...]] = {
+    TIME_REVERSE.name: BACKENDS,
+    FREQ_HYBRID_750.name: ("audioldm2",),
+}
+
+
 def build_engine(
-    backend: str, device: str, model_id: str | None = None
+    backend: str,
+    device: str,
+    model_id: str | None = None,
+    task: str = TIME_REVERSE.name,
+    projector: Path | None = None,
 ) -> AudioGenerator:
-    """The generator for a backend name, loaded lazily on first use.
+    """The generator for a (task, backend), loaded lazily on first use.
 
     Imported here rather than at the top so that the loop -- and its tests,
-    which use a fake generator -- do not pay for diffusers.
+    which use a fake generator -- do not pay for diffusers. Everything that
+    can be wrong about the combination is raised here, before any weights
+    are read.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}, got {backend}")
+    if task not in TASK_BACKENDS:
+        raise ValueError(f"task must be one of {tuple(TASK_BACKENDS)}, got {task}")
+    if backend not in TASK_BACKENDS[task]:
+        raise ValueError(
+            f"{task} can only be sampled on {TASK_BACKENDS[task]}, not {backend}"
+        )
     kwargs: dict[str, Any] = {"device": device}
     if model_id:
         kwargs["model_id"] = model_id
+    if task == FREQ_HYBRID_750.name:
+        if projector is None:
+            raise ValueError(f"{task} needs --projector (Step 0c's fitted low-pass)")
+        from ava.audio.bands import LowpassProjector
+        from ava.audio.engine_audioldm2 import AudioLDM2HybridEngine
+
+        fitted = LowpassProjector.load(projector)
+        if fitted.cutoff_hz != 750.0:
+            raise ValueError(
+                f"{task} expects a 750 Hz projector, {projector} is {fitted.cutoff_hz}"
+            )
+        return AudioLDM2HybridEngine(projector=fitted, **kwargs)
     if backend == "audioldm2":
         from ava.audio.engine_audioldm2 import AudioLDM2Engine
 
@@ -251,7 +288,7 @@ def evaluate_candidate(
     wave = engine.generate(audio_spec)
     seconds = time.perf_counter() - t0
 
-    views = perceive(wave, task)
+    views = perceive(wave, task, engine.sample_rate)
     paths = {
         name: write_wav(out_dir / f"{name}.wav", view, engine.sample_rate)
         for name, view in zip(task.view_names, views, strict=True)
@@ -485,6 +522,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=TIME_REVERSE.name,
         help="which audio illusion to search",
     )
+    p.add_argument(
+        "--projector",
+        type=Path,
+        default=None,
+        help="Step 0c's fitted low-pass (.npz stem), required by freq_hybrid_750",
+    )
     return p
 
 
@@ -518,16 +561,32 @@ def main(argv: list[str] | None = None) -> None:
         backend=args.backend,
         model_id=args.model_id,
         task=args.task,
+        projector=None if args.projector is None else str(args.projector),
+        projector_md5=None
+        if args.projector is None
+        else hashlib.md5(
+            Path(args.projector).with_suffix(".npz").read_bytes()
+        ).hexdigest(),
     )
     conn = connect(args.runs_dir / VOCAB_FILENAME)
     added = seed_audio_vocab(conn)
     if added:
         print(f"[vocab] seeded {added} audio arms")
+    if config.task == FREQ_HYBRID_750.name:
+        added = seed_hybrid_vocab(conn)
+        if added:
+            print(f"[vocab] seeded {added} hybrid arms")
     paths = RunPaths(args.runs_dir / args.run_id)
 
     from ava.audio.judge import ClapJudge
 
-    engine = build_engine(config.backend, config.device, config.model_id)
+    engine = build_engine(
+        config.backend,
+        config.device,
+        config.model_id,
+        task=config.task,
+        projector=None if config.projector is None else Path(config.projector),
+    )
     print(f"[engine] {config.backend} ({config.model_id or 'default checkpoint'})")
     judge = ClapJudge(device=config.device, sample_rate=engine.sample_rate)
     proposer: Proposer

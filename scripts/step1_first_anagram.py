@@ -35,7 +35,7 @@ from ava.audio.judge import ClapJudge
 from ava.audio.loop import AUDIO_TASK_NAMES, BACKENDS, AudioGenerator, build_engine
 from ava.audio.perceive import perceive
 from ava.audio.spec import AudioCandidateSpec
-from ava.audio.tasks import TIME_REVERSE
+from ava.audio.tasks import FREQ_HYBRID_750, TIME_REVERSE
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import IllusionTask, get_task
 from ava.metric import scores_to_probs
@@ -58,6 +58,14 @@ PROMPT_PAIRS: dict[str, list[tuple[str, str]]] = {
             "a balloon being inflated, building up to a stop",
         ),
     ],
+    # (near, far): a texture heard in the room, and something whose identity
+    # sits below 750 Hz, heard through the wall. Factorized Diffusion's advice
+    # -- at least one flexible subject -- is followed on the near side.
+    FREQ_HYBRID_750.name: [
+        ("rain falling steadily on a roof", "distant thunder rumbling"),
+        ("a crowd applauding in a hall", "a bass drum beating slowly"),
+        ("food sizzling in a frying pan", "a truck engine idling"),
+    ],
 }
 
 
@@ -76,7 +84,7 @@ def evaluate(
     """
     wave = engine.generate(spec)
     rate = engine.sample_rate
-    views = perceive(wave, task)
+    views = perceive(wave, task, rate)
 
     matrix = judge.score_views(views, spec.prompts)
     p_forward, p_reverse, j = scores_to_probs(matrix, judge.logit_scale)
@@ -128,6 +136,7 @@ def main() -> None:
     )
     parser.add_argument("--backend", choices=BACKENDS, default="stable_audio")
     parser.add_argument("--task", choices=AUDIO_TASK_NAMES, default=TIME_REVERSE.name)
+    parser.add_argument("--projector", type=Path, default=None)
     parser.add_argument("--model-id", default=None, help="default: the backend's own")
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--steps", type=int, default=100)
@@ -143,7 +152,9 @@ def main() -> None:
     if task.name not in PROMPT_PAIRS:
         raise SystemExit(f"no first-anagram prompt pairs authored for {task.name}")
 
-    engine = build_engine(args.backend, args.device, args.model_id)
+    engine = build_engine(
+        args.backend, args.device, args.model_id, task.name, args.projector
+    )
     judge = ClapJudge(device=args.device, sample_rate=engine.sample_rate)
 
     rows: list[dict[str, Any]] = []

@@ -26,7 +26,23 @@ TIME_REVERSE = IllusionTask(
     "as the view (Step 0b for the view, Step 1 for the first anagrams)",
 )
 
-AUDIO_TASKS: tuple[IllusionTask, ...] = (TIME_REVERSE,)
+# The frequency hybrid: Factorized Diffusion's hybrid image with a low-pass
+# in place of the blur. `near` is what is heard in the room (the whole
+# signal), `far` what reaches the next room (below 750 Hz). The sampler's
+# split lives in `ava.audio.bands` and needs a fitted projector, which is why
+# this task has a `--projector` argument and no default. Slots are not
+# symmetric: swapping the prompts asks for a different sound.
+FREQ_HYBRID_750 = IllusionTask(
+    name="freq_hybrid_750",
+    paper=AUDIO,
+    slots=(Slot("near", SUBJECT), Slot("far", SUBJECT)),
+    view_names=("near", "far_750"),
+    reduction="sum",
+    citation="ava/audio/bands.py: Factorized Diffusion's hybrid with a fitted "
+    "low-pass on AudioLDM 2's latent (Step 0c for the view)",
+)
+
+AUDIO_TASKS: tuple[IllusionTask, ...] = (TIME_REVERSE, FREQ_HYBRID_750)
 
 for _task in AUDIO_TASKS:
     register_task(_task)

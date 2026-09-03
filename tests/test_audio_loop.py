@@ -36,7 +36,7 @@ from ava.audio.vocab import (
 )
 from ava.image.tasks import TASKS, all_tasks, get_task, register_task
 from ava.loop import RunPaths
-from ava.propose import BanditProposer
+from ava.propose import BanditProposer, UniformProposer
 from ava.search.evolve import ARCHIVE_FILENAME, EvolutionaryProposer, SearchConfig
 from ava.search.surrogate import SurrogateConfig
 from ava.spec import CandidateSpec
@@ -355,8 +355,8 @@ def test_views_files_and_columns_follow_the_task(wired, monkeypatch) -> None:
     from ava.image.tasks import AUDIO, SUBJECT, IllusionTask, Slot
 
     conn, paths, engine, judge = wired
-    monkeypatch.setitem(perceive_module.VIEWS, "loud", lambda w: w)
-    monkeypatch.setitem(perceive_module.VIEWS, "quiet", lambda w: 0.5 * w)
+    monkeypatch.setitem(perceive_module.VIEWS, "loud", lambda w, r: w)
+    monkeypatch.setitem(perceive_module.VIEWS, "quiet", lambda w, r: 0.5 * w)
     task = IllusionTask(
         name="test_loud_quiet",
         paper=AUDIO,
@@ -393,3 +393,77 @@ def test_views_files_and_columns_follow_the_task(wired, monkeypatch) -> None:
     text = audition.read_text()
     assert "| near prompt | far prompt |" in text
     assert "| loud.wav | quiet.wav |" in text
+
+
+# ---- the frequency hybrid as a task ---------------------------------------------
+
+
+def test_hybrid_needs_the_mel_backend_and_a_projector(tmp_path: Path) -> None:
+    from ava.audio.loop import build_engine
+    from ava.audio.tasks import FREQ_HYBRID_750
+
+    with pytest.raises(ValueError, match="only be sampled on"):
+        build_engine("stable_audio", "cpu", task=FREQ_HYBRID_750.name)
+    with pytest.raises(ValueError, match="projector"):
+        build_engine("audioldm2", "cpu", task=FREQ_HYBRID_750.name)
+    # A projector at the wrong cutoff is refused before any weights load.
+    from ava.audio.bands import LowpassProjector
+
+    LowpassProjector(np.eye(4), np.zeros(4), 1656.0).save(tmp_path / "p")
+    with pytest.raises(ValueError, match="750"):
+        build_engine(
+            "audioldm2", "cpu", task=FREQ_HYBRID_750.name, projector=tmp_path / "p"
+        )
+
+
+def test_hybrid_vocab_seeds_once_into_its_own_task(tmp_path: Path) -> None:
+    from ava.audio.vocab import HYBRID_LOW_SOUNDS, HYBRID_TEXTURES, seed_hybrid_vocab
+
+    conn = connect(tmp_path / "vocab.db")
+    assert seed_hybrid_vocab(conn) == len(HYBRID_TEXTURES) + len(HYBRID_LOW_SOUNDS) + 1
+    assert seed_hybrid_vocab(conn) == 0
+    arms = list_arms(conn, "freq_hybrid_750", "subject")
+    assert len(arms) == len(HYBRID_TEXTURES) + len(HYBRID_LOW_SOUNDS)
+    assert list_arms(conn, "time_reverse", "subject") == []
+    conn.close()
+
+
+def test_hybrid_run_records_its_projector_and_writes_near_and_far(
+    tmp_path: Path,
+) -> None:
+    from ava.audio.loop import AudioLoopConfig, run_loop
+    from ava.audio.tasks import FREQ_HYBRID_750
+    from ava.audio.vocab import seed_hybrid_vocab
+
+    conn = connect(tmp_path / "runs" / "vocab.db")
+    seed_hybrid_vocab(conn)
+    paths = RunPaths(tmp_path / "runs" / "h")
+    config = AudioLoopConfig(
+        run_id="h",
+        rounds=1,
+        k=3,
+        task=FREQ_HYBRID_750.name,
+        backend="audioldm2",
+        projector="results/step0c_freq_view/projector_750hz",
+        projector_md5="abc",
+        proposer="uniform",
+        duration_s=1.0,
+    )
+    proposer = UniformProposer(
+        conn,
+        np.random.default_rng(0),
+        tasks=[FREQ_HYBRID_750.name],
+        screening_seed=0,
+        guidance_scale=3.5,
+        num_inference_steps=20,
+    )
+    run_loop(config, paths, conn, proposer, FakeAudioGenerator(), FakeClapJudge())
+    text = paths.config.read_text()
+    assert "projector: results/step0c_freq_view/projector_750hz" in text
+    assert "projector_md5: abc" in text
+    rows = rows_of(paths)
+    assert len(rows) == 3
+    assert all(set(r["wav_paths"]) == {"near", "far_750"} for r in rows)
+    assert all(r["task"] == "freq_hybrid_750" for r in rows)
+    assert "| near prompt | far prompt |" in (paths.root / "audition.md").read_text()
+    conn.close()

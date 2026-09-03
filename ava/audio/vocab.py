@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from ava.audio.tasks import TIME_REVERSE
+from ava.audio.tasks import FREQ_HYBRID_750, TIME_REVERSE
 from ava.image.tasks import STYLE, SUBJECT
 from ava.vocab import UNIFORM_PRIOR, add_arm
 
@@ -94,6 +94,54 @@ SOURCE_PROMPTS: tuple[str, ...] = (
 # only style is none. The arm exists so the loop's credit assignment and the
 # component table have somewhere to put J.
 STYLES: tuple[str, ...] = ("",)
+
+
+# The frequency hybrid's pool. Factorized Diffusion found hybrids succeed far
+# more often when one subject is "flexible" -- a texture that tolerates
+# another sound being folded into it -- so half of these are textures, and
+# the other half are sounds whose identity sits below 750 Hz and so can be
+# heard through a wall. Both slots (`near`, `far`) draw from this one pool;
+# which end a word belongs at is for the search to find out.
+HYBRID_TEXTURES: tuple[str, ...] = (
+    "rain falling steadily on a roof",
+    "a crowd applauding in a hall",
+    "food sizzling in a frying pan",
+    "wind blowing through trees",
+    "a waterfall",
+    "a shower running",
+    "cicadas on a summer afternoon",
+    "footsteps on gravel",
+    "a busy street with traffic",
+    "a crackling campfire",
+    "waves breaking on a beach",
+    "a crowd murmuring in a restaurant",
+)
+
+HYBRID_LOW_SOUNDS: tuple[str, ...] = (
+    "distant thunder rumbling",
+    "a bass drum beating slowly",
+    "a truck engine idling",
+    "a foghorn sounding across water",
+    "a cello playing a low sustained note",
+    "a helicopter far away",
+    "a slow heartbeat",
+    "a subway train passing underneath",
+    "a large dog barking",
+    "a church organ holding a low chord",
+    "a diesel generator running",
+    "a man speaking in a deep voice",
+)
+
+
+def seed_hybrid_vocab(conn: sqlite3.Connection) -> int:
+    """Register the hybrid pool as arms of `freq_hybrid_750`. Idempotent."""
+    task = FREQ_HYBRID_750.name
+    added = 0
+    for word in HYBRID_TEXTURES + HYBRID_LOW_SOUNDS:
+        added += add_arm(conn, word, task, SUBJECT, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    for style in STYLES:
+        added += add_arm(conn, style, task, STYLE, AUTHORED_SOURCE, UNIFORM_PRIOR)
+    return added
 
 
 def seed_audio_vocab(conn: sqlite3.Connection) -> int:
