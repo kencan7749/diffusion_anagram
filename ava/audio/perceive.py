@@ -10,7 +10,11 @@ copying -- which is what makes it the cheapest possible anagram view. There is
 no parameter to tune and no inverse to derive.
 """
 
+from collections.abc import Callable
+
 import numpy as np
+
+from ava.image.tasks import IllusionTask
 
 
 def forward_view(wave: np.ndarray) -> np.ndarray:
@@ -33,4 +37,21 @@ def reverse_view(wave: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(wave[..., ::-1])
 
 
-VIEWS = {"forward": forward_view, "reverse": reverse_view}
+View = Callable[[np.ndarray], np.ndarray]
+
+# Keyed by the names `IllusionTask.view_names` uses for audio tasks. Other
+# modules add theirs here at import time (a registry, like the task table).
+VIEWS: dict[str, View] = {"forward": forward_view, "reverse": reverse_view}
+
+
+def views_of(task: IllusionTask) -> list[View]:
+    """The perceptual views of a task, in slot order."""
+    missing = [name for name in task.view_names if name not in VIEWS]
+    if missing:
+        raise KeyError(f"{task.name}: no audio view named {missing}")
+    return [VIEWS[name] for name in task.view_names]
+
+
+def perceive(wave: np.ndarray, task: IllusionTask) -> list[np.ndarray]:
+    """What a listener hears of one signal under each of the task's views."""
+    return [view(wave) for view in views_of(task)]

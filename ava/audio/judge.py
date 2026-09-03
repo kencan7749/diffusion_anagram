@@ -117,25 +117,35 @@ class ClapJudge:
     # ---- evaluation -------------------------------------------------------
 
     @torch.no_grad()
-    def self_similarity(self, wave: np.ndarray) -> float:
-        """Cosine between a signal's embedding and its reverse's.
+    def view_similarity(self, views: list[np.ndarray]) -> float:
+        """Cosine between the embeddings of the first two views of one signal.
 
         The prompt-free precondition. A value at 1.0 means CLAP cannot
-        represent the difference at all; the control signal says what 1.0
-        looks like when the sounds really are perceptually the same.
+        represent the difference between the views at all; a control signal
+        says what 1.0 looks like when the views really are perceptually the
+        same. For time reversal the views are the signal and its reverse.
         """
-        emb = self.audio_emb([forward_view(wave), reverse_view(wave)])
+        emb = self.audio_emb(views[:2])
         return float(emb[0] @ emb[1])
 
     @torch.no_grad()
+    def score_views(self, views: list[np.ndarray], prompts: list[str]) -> torch.Tensor:
+        """S[view][prompt], both axes in slot order.
+
+        The diagonal is what the illusion needs: view i should prefer
+        prompt i. Views are the *perceived* signals -- what a listener hears
+        after playing backwards, or through a wall -- not the sampler's algebra.
+        """
+        return self.audio_emb(views) @ self.text_emb(prompts).T
+
+    # The two-view names, kept for the reversal scripts and their tests.
+
+    def self_similarity(self, wave: np.ndarray) -> float:
+        return self.view_similarity([forward_view(wave), reverse_view(wave)])
+
     def score_matrix(
         self, wave: np.ndarray, prompt_forward: str, prompt_reverse: str
     ) -> torch.Tensor:
-        """S[view][prompt], both axes ordered (forward, reverse).
-
-        The diagonal is what the anagram needs: the forward view should prefer
-        the forward prompt and the reversed view the reversed prompt.
-        """
-        audio = self.audio_emb([forward_view(wave), reverse_view(wave)])
-        text = self.text_emb([prompt_forward, prompt_reverse])
-        return audio @ text.T
+        return self.score_views(
+            [forward_view(wave), reverse_view(wave)], [prompt_forward, prompt_reverse]
+        )

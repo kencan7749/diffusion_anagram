@@ -76,12 +76,14 @@ class FakeClapJudge:
         h = hashlib.sha1(f"{direction}|{prompt}".encode()).digest()
         return -0.08 + 0.20 * (int.from_bytes(h[:4], "little") / 2**32)
 
-    def score_matrix(self, wave, prompt_forward: str, prompt_reverse: str):
-        a = self._margin(prompt_forward, "forward")
-        b = self._margin(prompt_reverse, "reverse")
+    def score_views(self, views, prompts: list[str]):
+        # Slot 0 keeps the "forward" label and slot 1 "reverse" whatever the
+        # task, so the pairs that hold are the same ones as before.
+        a = self._margin(prompts[0], "forward")
+        b = self._margin(prompts[1], "reverse")
         return torch.tensor([[0.2 + a, 0.2], [0.2, 0.2 + b]])
 
-    def self_similarity(self, wave) -> float:
+    def view_similarity(self, views) -> float:
         return 0.7
 
     def text_emb(self, prompts: list[str]) -> torch.Tensor:
@@ -341,3 +343,53 @@ def test_backend_does_not_enter_the_candidate_uid() -> None:
     a = to_audio_spec(spec, AudioLoopConfig(run_id="a", backend="stable_audio"))
     b = to_audio_spec(spec, AudioLoopConfig(run_id="b", backend="audioldm2"))
     assert a.uid() == b.uid()
+
+
+# ---- the task names the views, the files and the columns --------------------
+
+
+def test_views_files_and_columns_follow_the_task(wired, monkeypatch) -> None:
+    """A task with other view names writes <view>.wav and labels the columns."""
+    from ava.audio import perceive as perceive_module
+    from ava.audio.loop import evaluate_candidate, write_audition
+    from ava.image.tasks import AUDIO, SUBJECT, IllusionTask, Slot
+
+    conn, paths, engine, judge = wired
+    monkeypatch.setitem(perceive_module.VIEWS, "loud", lambda w: w)
+    monkeypatch.setitem(perceive_module.VIEWS, "quiet", lambda w: 0.5 * w)
+    task = IllusionTask(
+        name="test_loud_quiet",
+        paper=AUDIO,
+        slots=(Slot("near", SUBJECT), Slot("far", SUBJECT)),
+        view_names=("loud", "quiet"),
+        reduction="sum",
+        citation="test",
+    )
+    if task.name not in TASKS:
+        register_task(task)
+    monkeypatch.setattr("ava.audio.loop.AUDIO_TASK_NAMES", (task.name,))
+    config = AudioLoopConfig(run_id="v", task=task.name, duration_s=1.0)
+    spec = CandidateSpec(task.name, ("rain", "thunder"), "", seed=3)
+    from ava.propose import Proposal
+
+    verdict, extras = evaluate_candidate(
+        Proposal(spec, origin="test", detail=""),
+        engine,
+        judge,
+        config,
+        paths.root / "c",
+    )
+    assert set(extras["wav_paths"]) == {"loud", "quiet"}
+    assert (paths.root / "c" / "quiet.wav").exists()
+    assert list(verdict.slots) == ["near", "far"]
+
+    from ava.audio.loop import audio_row
+
+    audition = write_audition(
+        [audio_row(Proposal(spec, origin="test", detail=""), verdict, 0, extras)],
+        paths.root / "audition.md",
+        None,
+    )
+    text = audition.read_text()
+    assert "| near prompt | far prompt |" in text
+    assert "| loud.wav | quiet.wav |" in text

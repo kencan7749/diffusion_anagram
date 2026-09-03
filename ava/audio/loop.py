@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import yaml
 
-from ava.audio.perceive import forward_view, reverse_view
+from ava.audio.perceive import perceive
 from ava.audio.spec import (
     DURATION_S,
     GUIDANCE_SCALE,
@@ -40,7 +40,7 @@ from ava.audio.spec import (
     NUM_INFERENCE_STEPS,
     AudioCandidateSpec,
 )
-from ava.audio.tasks import TIME_REVERSE
+from ava.audio.tasks import AUDIO_TASKS, TIME_REVERSE
 from ava.audio.vocab import seed_audio_vocab
 from ava.audio.wavfile import write_wav
 from ava.image.tasks import get_task
@@ -113,6 +113,8 @@ class AudioLoopConfig:
     model_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.task not in AUDIO_TASK_NAMES:
+            raise ValueError(f"task must be one of {AUDIO_TASK_NAMES}, got {self.task}")
         if self.backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend}")
         if self.supply not in SUPPLIES:
@@ -170,13 +172,16 @@ class AudioJudge(Protocol):
     @property
     def logit_scale(self) -> float: ...
 
-    def score_matrix(
-        self, wave: np.ndarray, prompt_forward: str, prompt_reverse: str
+    def score_views(
+        self, views: list[np.ndarray], prompts: list[str]
     ) -> torch.Tensor: ...
 
-    def self_similarity(self, wave: np.ndarray) -> float: ...
+    def view_similarity(self, views: list[np.ndarray]) -> float: ...
 
     def text_emb(self, prompts: list[str]) -> torch.Tensor: ...
+
+
+AUDIO_TASK_NAMES: tuple[str, ...] = tuple(task.name for task in AUDIO_TASKS)
 
 
 # ---------------------------------------------------------------------------
@@ -233,29 +238,27 @@ def evaluate_candidate(
     config: AudioLoopConfig,
     out_dir: Path,
 ) -> tuple[Verdict, dict[str, Any]]:
-    """Generate one candidate, write both directions, score it.
+    """Generate one candidate, write every view of it, score it.
 
     Returns the verdict and the row extras (wav paths, generation seconds).
+    The task names the views; each is written as `<view>.wav` and scored
+    against the prompt of its slot.
     """
     write_prompt_card(out_dir, proposal.spec, origin=proposal.origin)
     audio_spec = to_audio_spec(proposal.spec, config)
+    task = get_task(proposal.spec.task)
     t0 = time.perf_counter()
     wave = engine.generate(audio_spec)
     seconds = time.perf_counter() - t0
 
+    views = perceive(wave, task)
     paths = {
-        "forward": write_wav(
-            out_dir / "forward.wav", forward_view(wave), engine.sample_rate
-        ),
-        "reverse": write_wav(
-            out_dir / "reverse.wav", reverse_view(wave), engine.sample_rate
-        ),
+        name: write_wav(out_dir / f"{name}.wav", view, engine.sample_rate)
+        for name, view in zip(task.view_names, views, strict=True)
     }
-    matrix = judge.score_matrix(
-        wave, audio_spec.prompt_forward, audio_spec.prompt_reverse
-    ).cpu()
+    matrix = judge.score_views(views, audio_spec.prompts).cpu()
     verdict = verdict_for_wave(
-        proposal.spec, matrix, judge.logit_scale, judge.self_similarity(wave)
+        proposal.spec, matrix, judge.logit_scale, judge.view_similarity(views)
     )
     return verdict, {
         "wav_paths": {k: str(v) for k, v in paths.items()},
@@ -364,6 +367,12 @@ def write_audition(
     ranked = sorted(rows, key=rank_score, reverse=True)
     shown = ranked if min_j is None else [r for r in ranked if float(r["j"]) >= min_j]
     hidden = len(ranked) - len(shown)
+    # One task per run; its slot and view names label the columns.
+    task = (
+        get_task(ranked[0].get("task", TIME_REVERSE.name)) if ranked else TIME_REVERSE
+    )
+    slot_cols = " | ".join(f"{name} prompt" for name in task.slot_names)
+    wav_cols = " | ".join(f"{name}.wav" for name in task.view_names)
     lines = [
         "# Audition list",
         "",
@@ -374,22 +383,22 @@ def write_audition(
             else "."
         ),
         "",
-        "`sep` is the weaker direction's raw CLAP margin over the other prompt; "
-        "`selfsim` is the cosine between the forward and reversed embeddings "
-        "(near 1.0 means CLAP cannot hear the reversal at all).",
+        "`sep` is the weaker view's raw CLAP margin over the other prompt; "
+        "`selfsim` is the cosine between the two views' embeddings "
+        "(near 1.0 means CLAP cannot hear the difference between the views).",
         "",
-        "| sep | J | selfsim | forward prompt | reverse prompt | seed | origin "
-        "| forward.wav | reverse.wav |",
-        "|---|---|---|---|---|---|---|---|---|",
+        f"| sep | J | selfsim | {slot_cols} | seed | origin | {wav_cols} |",
+        "|---" * (5 + len(task.slots) + len(task.view_names)) + "|",
     ]
     for r in shown:
         wav = r.get("wav_paths", {})
         selfsim = r.get("self_similarity")
+        prompts = " | ".join(r["prompts"])
+        wavs = " | ".join(wav.get(name, "") for name in task.view_names)
         lines.append(
             f"| {rank_score(r):+.3f} | {float(r['j']):.3f} "
             f"| {'—' if selfsim is None else f'{float(selfsim):.3f}'} "
-            f"| {r['prompts'][0]} | {r['prompts'][1]} | {r['seed']} | {r['origin']} "
-            f"| {wav.get('forward', '')} | {wav.get('reverse', '')} |"
+            f"| {prompts} | {r['seed']} | {r['origin']} | {wavs} |"
         )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -470,6 +479,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="which model's latent the anagram is sampled in",
     )
     p.add_argument("--model-id", default=None, help="default: the backend's own")
+    p.add_argument(
+        "--task",
+        choices=AUDIO_TASK_NAMES,
+        default=TIME_REVERSE.name,
+        help="which audio illusion to search",
+    )
     return p
 
 
@@ -502,6 +517,7 @@ def main(argv: list[str] | None = None) -> None:
         device=args.device,
         backend=args.backend,
         model_id=args.model_id,
+        task=args.task,
     )
     conn = connect(args.runs_dir / VOCAB_FILENAME)
     added = seed_audio_vocab(conn)
