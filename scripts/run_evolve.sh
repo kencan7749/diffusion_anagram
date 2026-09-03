@@ -61,6 +61,7 @@ run() {
 
 mkdir -p runs
 LOG="runs/${RUN_ID}.log"
+[[ "${DRY_RUN:-0}" == "1" ]] && LOG=/dev/null  # a dry run leaves no trace
 echo "[run_evolve] run_id=${RUN_ID} tasks=${TASKS} rounds=${ROUNDS} k=${K}" \
      "seed=${SEED} clusters=${CLUSTERS} eta=${ETA} race_fraction=${RACE_FRACTION}" \
      "max_seeds=${MAX_SEEDS} animate=${ANIMATE}" | tee -a "$LOG"
